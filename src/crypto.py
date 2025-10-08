@@ -16,7 +16,10 @@ with open(config_path, 'r') as f:
     config = json.load(f)
 
 backend = default_backend()
-parameters = dh.generate_parameters(generator=2, key_size=config['key_size'])
+
+p = int('B6F676C1440DBDAF286A55D9CC2826E67355B077EB15D49D93981E685852282B1A5F15B9C4FD15C0A17A234DC414B46868A785CDDB55DA662DD64BFAF7E32D33D28273DA1CEBAC9CF2BD720E492FCF01AD3AC4A2B04843FA7DDF8279C7459F7AC078E87282D7B417D478466809EE2981E32681A792F6C2454FA62DA4CB2498C7', 16)
+g = 2
+parameters = dh.DHParameterNumbers(p, g).parameters(backend)
 
 def derive_key(shared_secret, salt=None):
     if salt is None:
@@ -41,11 +44,13 @@ def ratchet_key(current_key):
     return hashlib.sha256(current_key + str(version).encode()).digest()
 
 def encrypt_message(message, key):
+    if isinstance(message, str):
+        message = message.encode('utf-8')
     iv = os.urandom(16)
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=backend)
     encryptor = cipher.encryptor()
     padder = padding.PKCS7(128).padder()
-    padded = padder.update(message.encode()) + padder.finalize()
+    padded = padder.update(message) + padder.finalize()
     encrypted = encryptor.update(padded) + encryptor.finalize()
     return iv + encrypted
 
@@ -57,4 +62,4 @@ def decrypt_message(encrypted_data, key):
     decrypted_padded = decryptor.update(encrypted) + decryptor.finalize()
     unpadder = padding.PKCS7(128).unpadder()
     decrypted = unpadder.update(decrypted_padded) + unpadder.finalize()
-    return decrypted.decode()
+    return decrypted.decode('utf-8')
