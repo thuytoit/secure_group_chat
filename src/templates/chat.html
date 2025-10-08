@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head><title>Secure Group Chat</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+</head>
+<body>
+  <h1>Chat: {{ username }} ({{ role }})</h1>
+  <a href="/logout">Logout</a><br>
+  <div id="messages" style="border:1px solid #ccc; height:200px; overflow-y:scroll; padding:10px;"></div>
+  <input id="msgInput" placeholder="Type message..." style="width:300px;">
+  <button onclick="sendMsg()">Send</button><br>
+  {% if role == 'admin' %}
+  <input id="kickUser" placeholder="Username to kick">
+  <button onclick="kickUser()">Kick (Rotates Key)</button>
+  {% endif %}
+  <script>
+    const socket = io();
+    let groupKey;  // For decrypt (room for future: per-user keys)
+
+    // DH Setup (simplified BigInt for browser—room for full DH params from server)
+    const g = 2n;
+    const p = 0xFFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52A9AAA5814BA6B6D7n;  // 1024-bit prime
+    let priv;  // Private key (room for secure random gen addon)
+
+    socket.on('connect', () => {
+      // Basic connect—room for token pass in emit for auth
+      priv = BigInt(Math.floor(Math.random() * Number(p - 1n)) + 1n);
+      const pub = powMod(g, priv, p);
+      socket.emit('dh_peer', {pub: pub.toString(16)});
+    });
+
+    socket.on('dh_pub', data => {
+      // Compute shared secret (room for server pub validation)
+      const peerPub = BigInt('0x' + data.pub);
+      const shared = powMod(peerPub, priv, p);
+      // Derive userKey (basic PBKDF2—room for ratchet integration)
+      const userKey = CryptoJS.PBKDF2(shared.toString(16), 'yoursalt_here_make_it_random', {keySize: 8, iterations: 100000});
+      // Room for storing per-session keys
+    });
+
+    socket.on('group_key', data => {
+      // Decrypt group key with userKey (room for error handling/addon)
+      const encBytes = CryptoJS.enc.Hex.parse(data.enc);
+      const iv = encBytes.clone(); iv.sigBytes = 16; encBytes.clamp(); encBytes.words.splice(0, 4); encBytes.sigBytes -= 16;
+      const decKey = CryptoJS.AES.decrypt({ciphertext: encBytes}, userKey, {iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7});
+      groupKey = decKey.toString(CryptoJS.enc.Utf8);  // Set for msg decrypt
+      console.log('Group key received');  // Debug—remove for prod
+    });
+
+    socket.on('joined', data => addMsg(data.msg));
+    socket.on('notice', data => addMsg(data.msg));
+    socket.on('encrypted_msg', data => {
+      if (!groupKey) {
+        addMsg(`From ${data.sender}: [Key not ready—retry]`);
+        return;
+      }
+      const enc = CryptoJS.enc.Hex.parse(data.enc);
+      const iv = enc.clone(); iv.sigBytes = 16; enc.clamp(); enc.words.splice(0, 4); enc.sigBytes -= 16;
+      const decrypted = CryptoJS.AES.decrypt({ciphertext: enc}, groupKey, {iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7});
+      const plain = decrypted.toString(CryptoJS.enc.Utf8);
+      addMsg(`From ${data.sender}: ${plain || '[Decrypt fail—key mismatch]'} `);
+    });
+    socket.on('kicked', data => { alert(data.msg || 'Kicked!'); window.location = '/'; });
+
+    function addMsg(msg) {
+      const messagesDiv = document.getElementById('messages');
+      messagesDiv.innerHTML += `<p>${new Date().toLocaleTimeString()}: ${msg}</p>`;
+      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+
+    function sendMsg() {
+      const msgInput = document.getElementById('msgInput');
+      const msg = msgInput.value.trim();
+      if (msg && socket.connected) {
+        // Basic emit—room for client-side encrypt addon (e.g., encrypt before emit)
+        socket.emit('message', {msg});
+        addMsg(`You: ${msg}`);  // Local echo (room for remove if server echoes)
+        msgInput.value = '';
+      } else if (!socket.connected) {
+        addMsg('Error: Not connected—retry send');
+      }
+    }
+
+    function kickUser() {
+      const user = document.getElementById('kickUser').value.trim();
+      if (user && socket.connected) {
+        socket.emit('admin_kick', {user});
+        document.getElementById('kickUser').value = '';  // Clear input
+      }
+    }
+
+    function powMod(base, exp, mod) {
+      let res = 1n;
+      base = base % mod;
+      while (exp > 0n) {
+        if (exp % 2n == 1n) res = (res * base) % mod;
+        base = (base * base) % mod;
+        exp /= 2n;
+      }
+      return res;
+    }
+
+    // Room for future: Enter key for send (msgInput.addEventListener('keypress', e => { if (e.key === 'Enter') sendMsg(); }));
+  </script>
+</body>
+</html>

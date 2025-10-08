@@ -1,5 +1,8 @@
-from src.crypto import derive_key, ratchet_key, encrypt_message, decrypt_message
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from src.crypto import derive_key, ratchet_key, encrypt_message, decrypt_message
 
 # Test derive (uses 32-byte key from PBKDF2)
 print("Derive test:", derive_key(b"shared_secret")[:10])  # First 10 bytes

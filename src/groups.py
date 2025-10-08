@@ -1,6 +1,9 @@
-import json
+import sys
 import os
-from src.users import is_admin, load_users
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import json
+from users import is_admin
 
 GROUPS_FILE = 'groups.json'
 

@@ -1,5 +1,8 @@
-import hashlib
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import hashlib
 import json
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives import hashes
@@ -8,7 +11,8 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.backends import default_backend
 
-with open('config.json', 'r') as f:
+config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+with open(config_path, 'r') as f:
     config = json.load(f)
 
 backend = default_backend()

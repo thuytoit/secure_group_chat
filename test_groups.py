@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from src.groups import GroupManager
 from src.users import login
 gm = GroupManager()
