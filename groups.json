@@ -1,1 +1,11 @@
-{"main_group": {"members": ["admin", "user1"], "key": "affb638fcaaaa6b34e5cf677df0ce9b653b8abea0d9827eb24718717d22391ee"}}
+{
+  "main_group": {
+    "members": [
+      "admin",
+      "testuser",
+      "user1"
+    ],
+    "key": "3dd6e8cd8b61fd4176a2f371361692fde9fbbe283009b4d098fedcb0026c2347",
+    "version": 0
+  }
+}

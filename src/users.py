@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import json
 import bcrypt
+import os
 
 USERS_FILE = 'users.json'
 
@@ -35,8 +36,11 @@ def login(username, password):
     if username not in users:
         return False, None, "No user"
     if bcrypt.checkpw(password.encode(), users[username]['password'].encode()):
-        token = f"{username}_token_{os.urandom(8).hex()}"
-        users[username]['token'] = token
+        if users[username].get('token') is None:
+            token = f"{username}_token_{os.urandom(8).hex()}"
+            users[username]['token'] = token
+        else:
+            token = users[username]['token']
         save_users(users)
         return True, token, users[username]['role']
     return False, None, "Wrong pass"

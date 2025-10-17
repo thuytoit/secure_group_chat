@@ -1,178 +1,368 @@
 <!DOCTYPE html>
 <html>
-<head><title>Secure Group Chat</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+<head>
+  <title>Secure Group Chat</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+    h1 { color: #333; }
+    .info-bar { background: #e3f2fd; padding: 10px; border-radius: 4px; margin-bottom: 10px; }
+    .info-bar p { margin: 5px 0; }
+    .status-badge { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 12px; font-weight: bold; }
+    .status-ok { background: #4caf50; color: white; }
+    .status-waiting { background: #ff9800; color: white; }
+    .status-error { background: #f44336; color: white; }
+    #messages {
+      border: 1px solid #ddd;
+      height: 350px;
+      overflow-y: auto;
+      padding: 10px;
+      background: white;
+      margin-bottom: 10px;
+      border-radius: 4px;
+    }
+    .msg { padding: 8px; margin: 5px 0; border-left: 3px solid #2196f3; background: #f9f9f9; }
+    .msg.sys { border-left-color: #2196f3; color: #1976d2; font-style: italic; }
+    .msg.error { border-left-color: #f44336; color: #d32f2f; font-weight: bold; }
+    .msg.own { border-left-color: #4caf50; background: #f1f8e9; }
+    .input-group { margin-bottom: 10px; }
+    input[type="text"] { padding: 10px; width: 100%; box-sizing: border-box; border: 1px solid #ddd; border-radius: 4px; }
+    button { padding: 10px 15px; background: #2196f3; color: white; border: none; border-radius: 4px; cursor: pointer; margin-right: 5px; }
+    button:hover { background: #1976d2; }
+    .admin-panel { margin-top: 15px; padding: 10px; background: #fff3e0; border-radius: 4px; }
+    .admin-panel h3 { margin-top: 0; }
+  </style>
+  <!-- Cache buster: {{ now }} ensures fresh load on relogin -->
 </head>
 <body>
-  <h1>Chat: {{ username }} ({{ role }})</h1>
-  <a href="/logout">Logout</a><br>
-  <div id="messages" style="border:1px solid #ccc; height:200px; overflow-y:scroll; padding:10px;"></div>
-  <input id="msgInput" placeholder="Type message..." style="width:300px;">
-  <button onclick="sendMsg()">Send</button><br>
-  {% if role == 'admin' %}
-  <input id="kickUser" placeholder="Username to kick">
-  <button onclick="kickUser()">Kick (Rotates Key)</button>
-  {% endif %}
+  <h1>Secure Group Chat</h1>
+  
+  <div class="info-bar">
+    <p>
+      <strong>User:</strong> <span id="username-display">loading...</span> |
+      <strong>Role:</strong> <span id="role-display">loading...</span> |
+      <strong>Status:</strong> <span id="status-badge" class="status-badge status-waiting">Connecting...</span>
+    </p>
+    <p><strong>Connection:</strong> <span id="conn-status">Initializing...</span></p>
+  </div>
+  
+  <div id="messages"></div>
+  
+  <div class="input-group">
+    <input id="msg-input" type="text" placeholder="Type a message..." />
+    <button onclick="sendMessage()">Send</button>
+  </div>
+  
+  <div id="admin-section" style="display: none;" class="admin-panel">
+    <h3>Admin Controls</h3>
+    <input id="kick-user-input" type="text" placeholder="Username to kick..." />
+    <button onclick="kickUser()">Kick User</button>
+  </div>
+  
+  <p style="margin-top: 20px; font-size: 12px; color: #666;">
+    <a href="/logout">Logout</a>
+  </p>
+
   <script>
-    // DH Setup - Match your crypto.py params exactly!
+    const TOKEN = '{{ token | safe }}';
+    const SALT = '{{ salt | tojson | safe }}';  // Editor-friendly: tojson wraps as string
+    const ITERATIONS = {{ iterations | tojson }};  // Editor-friendly: tojson makes valid JS num
+
+    // ===== DH Parameters (must match Python) =====
     const g = 2n;
     const p = 0xB6F676C1440DBDAF286A55D9CC2826E67355B077EB15D49D93981E685852282B1A5F15B9C4FD15C0A17A234DC414B46868A785CDDB55DA662DD64BFAF7E32D33D28273DA1CEBAC9CF2BD720E492FCF01AD3AC4A2B04843FA7DDF8279C7459F7AC078E87282D7B417D478466809EE2981E32681A792F6C2454FA62DA4CB2498C7n;
-    const hexLen = 256;  // For full 1024-bit/128-byte hex
-  
-    let groupKey;  // WordArray for AES
-    let userKey;   // For group_key decrypt
-    let priv;      // Client private key (generated NOW, before socket)
-    let dhTimeout; // For retry
-  
-    // Generate fixed priv IMMEDIATELY (large enough for full pub, no race issues)
-    priv = 0x123456789abcdef0n;
-    console.log('Client priv set at load:', priv.toString(16));  // Expect: 123456789abcdef0
-  
-    const socket = io();
-  
-    socket.on('connect', () => {
-      console.log('Socket connected - priv ready:', priv.toString(16));
-    });
-  
-    socket.on('dh_pub', data => {
-      console.log('Received server pub');
-      if (!priv || priv === 0n) {
-        console.error('Priv not set - refresh page');
-        addMsg('Error: Key setup failed - refresh');
-        return;
+    const HEX_LEN = 512;  // 2048-bit = 512 hex chars (256 bytes) for exact PBKDF2 match
+
+    // ===== State (separate socket for no-nuke safety) =====
+    let socket;  // Dedicated var
+    let state = {
+      groupKey: null,
+      userKey: null,
+      priv: null,
+      keyReady: false,
+      keyVersion: -1
+    };
+
+    // ===== Crypto Helpers =====
+    function powMod(base, exp, mod) {
+      let result = 1n;
+      base %= mod;
+      while (exp > 0n) {
+        if (exp & 1n) result = (result * base) % mod;
+        base = (base * base) % mod;
+        exp >>= 1n;
       }
+      return result;
+    }
+
+    function updateStatus(message, type = 'waiting') {
+      const badge = document.getElementById('status-badge');
+      badge.textContent = message;
+      badge.className = `status-badge status-${type}`;
+      document.getElementById('conn-status').textContent = message;
+    }
+
+    function addMessage(text, type = 'sys') {
+      const div = document.createElement('div');
+      div.className = `msg msg-${type}`;
+      div.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+      document.getElementById('messages').appendChild(div);
+      document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+    }
+
+    function handleAuthError(msg) {
+      addMessage(`ERROR: ${msg}`, 'error');
+      updateStatus(`Error: ${msg}`, 'error');
+      if (msg.includes('expired') || msg.includes('Invalid')) {
+        setTimeout(() => { window.location = '/'; }, 2000);
+      }
+    }
+
+    // ===== Socket IO (create early, never nuke) =====
+    socket = io({ auth: { token: TOKEN } });
+
+    socket.on('connect', () => {
+      console.log('Connected');
+      updateStatus('Connected', 'ok');
+    });
+
+    socket.on('connect_error', (err) => {
+      console.error('Connect error:', err);
+      updateStatus('Connection failed', 'error');
+    });
+
+    socket.on('error', (data) => {
+      console.error('Error:', data.msg);
+      handleAuthError(data.msg);
+    });
+
+    socket.on('force_disconnect', () => {
+      addMessage('Session replaced - redirecting to login', 'error');
+      updateStatus('Session replaced', 'error');
+      setTimeout(() => { socket.disconnect(); window.location = '/'; }, 1000);
+    });
+
+    socket.on('dh_pub', (data) => {
+      console.log('Received server pub');
+      updateStatus('Performing key exchange...', 'waiting');
+
       try {
-        console.log('Priv for compute:', priv.toString(16));
-        const peerPub = BigInt('0x' + data.pub);
-        console.log('Server pub sample:', peerPub.toString(16).substring(0, 20) + '...');
-        const shared = powMod(peerPub, priv, p);
-        console.log('Shared computed sample:', shared.toString(16).substring(0, 20) + '...');
-        // PAD TO FULL 128 BYTES to match Python shared bytes
-        const sharedHex = shared.toString(16).padStart(hexLen, '0');
-        console.log('Padded sharedHex sample:', sharedHex.substring(0, 20) + '... (len: ' + sharedHex.length + ')');
-        userKey = CryptoJS.PBKDF2(CryptoJS.enc.Hex.parse(sharedHex), CryptoJS.enc.Utf8.parse('fixed_salt_for_demo'), {keySize: 8, iterations: 100000});
-        console.log('User key derived');
-  
-        // Emit our pub
-        const pub = powMod(g, priv, p);
-        console.log('Computed pub sample:', pub.toString(16).substring(0, 20) + '... (full len:', pub.toString(16).length, ')');  // Expect ~49dc... len~256
-        if (pub <= 1n || pub >= p) {
-          console.error('Invalid pub computed:', pub.toString(16));
-          addMsg('Error: Invalid pub key - refresh');
-          return;
-        }
-        const pubHex = pub.toString(16).padStart(hexLen, '0');
-        console.log('Sent client pub sample:', pubHex.substring(0, 10) + '...');
-        socket.emit('dh_peer', {pub: pubHex});
-  
-        // Timeout for group_key
-        dhTimeout = setTimeout(() => {
-          if (!groupKey) {
-            console.log('Group key timeout - check server logs');
-            addMsg('Warning: Key setup slow - wait or refresh');
-          }
-        }, 10000);
+        const serverPub = BigInt('0x' + data.pub);
+        const shared = powMod(serverPub, state.priv, p);
+        const sharedHex = shared.toString(16).padStart(HEX_LEN, '0');
+
+        console.log('Shared hex len:', sharedHex.length);  // Debug: should be 512
+
+        state.userKey = CryptoJS.PBKDF2(
+          CryptoJS.enc.Hex.parse(sharedHex),
+          CryptoJS.enc.Utf8.parse(SALT),  // Matches Python config
+          { keySize: 8, iterations: ITERATIONS }
+        );
+
+        const clientPub = powMod(g, state.priv, p);
+        const clientPubHex = clientPub.toString(16).padStart(HEX_LEN, '0');  // Consistent padding
+
+        socket.emit('dh_peer', { pub: clientPubHex });  // Safe: socket always exists
+        console.log('Sent client pub');
+        updateStatus('Waiting for group key...', 'waiting');
       } catch (e) {
         console.error('DH error:', e);
-        addMsg('DH key exchange failed - refresh page');
+        addMessage(`DH Error: ${e.message}`, 'error');
+        updateStatus('DH failed', 'error');
       }
     });
-  
-    socket.on('group_key', data => {
-      if (!userKey) {
-        console.log('No user key yet—skipping');
+
+    socket.on('group_key', (data) => {
+      if (!state.userKey) {
+        console.log('No user key yet');
         return;
       }
+
       try {
+        const version = data.version || 0;
+        const status = data.status || 'initial';
+
         const encBytes = CryptoJS.enc.Hex.parse(data.enc);
-        const iv = encBytes.clone(); iv.sigBytes = 16; encBytes.clamp(); encBytes.words.splice(0, 4); encBytes.sigBytes -= 16;
-        const decKey = CryptoJS.AES.decrypt({ciphertext: encBytes}, userKey, {iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7});
-        groupKey = decKey;  // Raw decrypted WordArray (32 bytes for AES-256 key)
-        console.log('Group key set! (sigBytes:', groupKey.sigBytes, ')');
-        if (dhTimeout) clearTimeout(dhTimeout);
-      } catch (e) {
-        console.error('Group key decrypt failed:', e);
-        addMsg('Failed to decrypt group key - refresh');
-      }
-    });
-  
-    socket.on('error', data => {
-      console.error('Server error:', data.msg);
-      addMsg('Error: ' + data.msg);
-    });
-  
-    socket.on('reconnected', data => addMsg(data.msg));
-    socket.on('joined', data => {
-      const currentUser = '{{ username }}';
-      if (data.msg.includes(currentUser + ' joined the group!')) return;
-      addMsg(data.msg);
-    });
-    socket.on('notice', data => addMsg(data.msg));
-    socket.on('encrypted_msg', data => {
-      if (!groupKey) {
-        console.log('No group key yet—skipping');
-        addMsg(`From ${data.sender}: [Key not ready—wait]`);
-        return;
-      }
-      try {
-        const enc = CryptoJS.enc.Hex.parse(data.enc);
-        const iv = enc.clone(); iv.sigBytes = 16; enc.clamp(); enc.words.splice(0, 4); enc.sigBytes -= 16;
-        const decrypted = CryptoJS.AES.decrypt({ciphertext: enc}, groupKey, {iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7});
-        const plain = decrypted.toString(CryptoJS.enc.Utf8);
-        addMsg(`From ${data.sender}: ${plain || '[Decrypt fail—key mismatch]'}`);
-      } catch (e) {
-        console.error('Decrypt error:', e);
-        addMsg(`From ${data.sender}: [Decrypt error]`);
-      }
-    });
-    socket.on('kicked', data => { alert(data.msg || 'Kicked!'); window.location = '/'; });
-  
-    function addMsg(msg) {
-      const messagesDiv = document.getElementById('messages');
-      messagesDiv.innerHTML += `<p>${new Date().toLocaleTimeString()}: ${msg}</p>`;
-      messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    }
-  
-    function sendMsg() {
-      const msgInput = document.getElementById('msgInput');
-      const msg = msgInput.value.trim();
-      if (msg && socket.connected) {
-        if (!groupKey) {
-          addMsg('Error: Key not ready—wait a moment or refresh');
+        const iv = encBytes.clone();
+        iv.sigBytes = 16;
+        encBytes.clamp();
+        encBytes.words.splice(0, 4);
+        encBytes.sigBytes -= 16;
+
+        const decrypted = CryptoJS.AES.decrypt(
+          { ciphertext: encBytes },
+          state.userKey,
+          { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+        );
+
+        if (!decrypted || decrypted.sigBytes === 0) {
+          throw new Error('Empty key');
+        }
+
+        // Version check: if higher, force update (handles rare races)
+        if (version > state.keyVersion) {
+          state.groupKey = decrypted;
+          state.keyVersion = version;
+        } else if (version < state.keyVersion) {
+          console.warn('Stale key version, ignoring');
           return;
         }
+
+        state.keyReady = true;
+
+        if (status === 'rotated') {
+          addMessage(`✓ Key rotated to v${version}`, 'sys');
+        } else {
+          addMessage(`✓ Encryption ready (v${version})`, 'sys');
+        }
+
+        updateStatus('Ready', 'ok');
+        console.log(`Key ready v${version}, decrypted bytes: ${decrypted.sigBytes}`);
+      } catch (e) {
+        console.error('Key decrypt failed:', e);
+        addMessage(`Key decrypt failed: ${e.message}`, 'error');
+        updateStatus('Key error', 'error');
+        state.keyReady = false;
+      }
+    });
+
+    socket.on('sys_msg', (data) => {
+      const { type, user, msg } = data;
+      if (type === 'joined') {
+        addMessage(`→ ${user} joined`, 'sys');
+      } else if (type === 'disconnected') {
+        addMessage(`← ${user} disconnected`, 'sys');
+      } else if (type === 'kicked') {
+        addMessage(`⊗ ${msg}`, 'sys');
+      }
+    });
+
+    socket.on('encrypted_msg', (data) => {
+      if (!state.groupKey || !state.keyReady) {
+        addMessage(`From ${data.sender}: [Key not ready - retrying connection]`, 'error');
+        return;
+      }
+
+      try {
+        const enc = CryptoJS.enc.Hex.parse(data.enc);
+        const iv = enc.clone();
+        iv.sigBytes = 16;
+        enc.clamp();
+        enc.words.splice(0, 4);
+        enc.sigBytes -= 16;
+
+        const decrypted = CryptoJS.AES.decrypt(
+          { ciphertext: enc },
+          state.groupKey,
+          { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+        );
+
+        const text = decrypted.toString(CryptoJS.enc.Utf8);
+        // Guard: if empty after decrypt (bad padding/key), error it
+        if (!text || text.length === 0) {
+          console.warn('Decrypt guard: empty text, possible key mismatch');
+          addMessage(`From ${data.sender}: [Decrypt error - bad padding]`, 'error');
+          return;
+        }
+        addMessage(`From ${data.sender}: ${text}`);
+      } catch (e) {
+        console.error('Decrypt error:', e);
+        addMessage(`From ${data.sender}: [Decrypt error]`, 'error');
+      }
+    });
+
+    socket.on('kicked', (data) => {
+      alert(data.msg || 'You were kicked');
+      window.location = '/';
+    });
+
+    socket.on('disconnect', () => {
+      addMessage('Disconnected from server', 'error');
+      updateStatus('Disconnected', 'error');
+      state.keyReady = false;
+    });
+
+    // ===== Initialize (nuke only non-socket state + full-size priv for pro security/randomness) =====
+    window.addEventListener('load', () => {
+      // Nuke only non-socket state for clean relogins
+      state.groupKey = null;
+      state.userKey = null;
+      state.priv = null;
+      state.keyReady = false;
+      state.keyVersion = -1;
+
+      document.getElementById('username-display').textContent = '{{ username }}';
+      document.getElementById('role-display').textContent = '{{ role }}';
+
+      // Full 256-byte priv (pro: matches DH size, better randomness)
+      const priv_hex = Array.from({ length: 256 }, () =>
+        Math.floor(Math.random() * 256).toString(16).padStart(2, '0')
+      ).join('');
+      state.priv = BigInt('0x' + priv_hex);
+      console.log('Full priv generated, len:', priv_hex.length / 2);  // Debug: 256
+
+      if ('{{ role }}' === 'admin') {
+        document.getElementById('admin-section').style.display = 'block';
+      }
+
+      console.log('Initialized clean');
+    });
+
+    // ===== Message Sending =====
+    function sendMessage() {
+      const input = document.getElementById('msg-input');
+      const msg = input.value.trim();
+
+      if (!msg) return;
+
+      if (!socket.connected) {
+        addMessage('Not connected', 'error');
+        return;
+      }
+
+      if (!state.keyReady) {
+        addMessage('Encryption not ready', 'error');
+        return;
+      }
+
+      try {
+        console.log('Encrypting msg with v', state.keyVersion);  // Debug
         const msgBytes = CryptoJS.enc.Utf8.parse(msg);
         const iv = CryptoJS.lib.WordArray.random(16);
-        const encrypted = CryptoJS.AES.encrypt(msgBytes, groupKey, {iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7});
+        const encrypted = CryptoJS.AES.encrypt(msgBytes, state.groupKey, {
+          iv: iv,
+          mode: CryptoJS.mode.CBC,
+          padding: CryptoJS.pad.Pkcs7
+        });
+
         const encWithIv = iv.concat(encrypted.ciphertext);
-        socket.emit('message', {enc: encWithIv.toString(CryptoJS.enc.Hex)});
-        addMsg(`You: ${msg}`);  // Local echo
-        msgInput.value = '';
-      } else if (!socket.connected) {
-        addMsg('Error: Not connected—retry send');
+        socket.emit('message', { enc: encWithIv.toString(CryptoJS.enc.Hex) });
+
+        addMessage(`You: ${msg}`, 'own');
+        input.value = '';
+      } catch (e) {
+        console.error('Encrypt error:', e);
+        addMessage(`Encrypt error: ${e.message}`, 'error');
       }
     }
-  
+
+    document.getElementById('msg-input').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') sendMessage();
+    });
+
+    // ===== Admin =====
     function kickUser() {
-      const user = document.getElementById('kickUser').value.trim();
-      if (user && socket.connected) {
-        socket.emit('admin_kick', {user});
-        document.getElementById('kickUser').value = '';
+      const user = document.getElementById('kick-user-input').value.trim();
+      if (!user) return;
+
+      if (!socket.connected) {
+        alert('Not connected');
+        return;
       }
-    }
-  
-    function powMod(base, exp, mod) {
-      let res = 1n;
-      base = base % mod;
-      if (base === 0n || exp === 0n) return 0n;  // Avoid invalid
-      exp = exp % (mod - 1n);  // Optional: Fermat, but safe
-      while (exp > 0n) {
-        if (exp % 2n === 1n) res = (res * base) % mod;
-        base = (base * base) % mod;
-        exp /= 2n;
-      }
-      return res;
+
+      socket.emit('admin_kick', { user });
+      document.getElementById('kick-user-input').value = '';
     }
   </script>
 </body>
