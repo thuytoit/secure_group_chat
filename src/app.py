@@ -2,7 +2,7 @@ import sys
 import os
 import json
 import logging
-import datetime  # For timezone
+import datetime
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -24,16 +24,14 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = config['secret_key']
 app.config['DEBUG'] = config.get('flask_debug', False)
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')  # Efficient async for small scale
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 gm = GroupManager()
 
-# Logging setup (pro: structured, levels)
 logging.basicConfig(level=logging.INFO if app.config['DEBUG'] else logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# Connection tracking
 connections = {}
-active_sids = {}  # username -> list[sids]
+active_sids = {}
 backend = default_backend()
 
 def get_username_from_token(token: str) -> str | None:
@@ -90,9 +88,9 @@ def chat():
                           username=session['username'], 
                           role=session['role'], 
                           token=session['token'],
-                          salt=config['salt'],  # Pass to JS for match
+                          salt=config['salt'],
                           iterations=config['iterations'],
-                          now=datetime.datetime.now(datetime.timezone.utc).isoformat())  # Cache buster, no deprecation/zoneinfo error
+                          now=datetime.datetime.now(datetime.timezone.utc).isoformat())
 
 @app.route('/health')
 def health():
@@ -108,9 +106,8 @@ def handle_connect(auth):
     username = get_username_from_token(token)
     sid = request.sid
 
-    # Enforce single session (efficient: O(1) disconnect old)
     if username in active_sids:
-        for old_sid in active_sids[username][:]:  # Copy to avoid mod during iter
+        for old_sid in active_sids[username][:]:
             emit('force_disconnect', room=old_sid)
             if old_sid in connections:
                 del connections[old_sid]
@@ -126,7 +123,6 @@ def handle_connect(auth):
     join_room('group')
     logger.info(f"[CONNECT] {username} ({sid})")
 
-    # DH keypair gen (fast, per-connect)
     param_nums = parameters.parameter_numbers()
     p, g = param_nums.p, param_nums.g
     priv_exp = int.from_bytes(os.urandom((p.bit_length() + 7) // 8), 'big') % (p - 2) + 2
@@ -166,7 +162,13 @@ def handle_dh_peer(data):
         peer_pub_key = peer_pub_num.public_key(backend)
 
         shared = priv_key.exchange(peer_pub_key)
-        user_key = derive_key(shared)
+        
+        # FIX: Pad shared secret to 256 bytes to match client
+        # Client pads to HEX_LEN (512 hex chars = 256 bytes)
+        shared_padded = shared.rjust(256, b'\x00')  # Pad with leading zeros
+        logger.info(f"[DH] Shared secret length: {len(shared)} -> {len(shared_padded)} bytes")
+        
+        user_key = derive_key(shared_padded)
         connections[sid]['user_key'] = user_key
         logger.info(f"[DH] Exchange complete for {sid}")
     except Exception as e:
@@ -174,7 +176,6 @@ def handle_dh_peer(data):
         emit('error', {'msg': 'Key exchange failed'})
         return
 
-    # Send group key (encrypted per-user)
     group = gm.groups.get('main_group', {})
     group_key = group.get('key')
     version = group.get('version', 0)
@@ -184,13 +185,12 @@ def handle_dh_peer(data):
         emit('group_key', {'enc': enc_data.hex(), 'version': version, 'status': 'initial'})
         logger.info(f"[KEY] Sent v{version} to {sid}")
 
-    # Add/notify
     username = connections[sid]['username']
     success, _, _ = gm.add_user(username, connections[sid]['token'])
     emit('sys_msg', {'type': 'joined', 'user': username}, room='group', skip_sid=sid)
     logger.info(f"[SYS] {username} joined")
 
-    connections[sid]['priv_key'] = None  # Cleanup (mem efficient)
+    connections[sid]['priv_key'] = None
 
 @socketio.on('message')
 def handle_message(data):
@@ -207,7 +207,6 @@ def handle_message(data):
     username = conn['username']
     enc_msg = data.get('enc', '')
 
-    # Broadcast (O(1) via room)
     emit('encrypted_msg', {'sender': username, 'enc': enc_msg}, room='group', skip_sid=sid)
     logger.info(f"[MSG] {username}")
 
@@ -232,7 +231,6 @@ def handle_kick(data):
     logger.info(f"[KICK] {kicked_user} kicked")
     new_version = gm.groups['main_group'].get('version', 0)
 
-    # Disconnect all for kicked (efficient loop)
     if kicked_user in active_sids:
         for s in active_sids[kicked_user][:]:
             emit('kicked', {'msg': msg}, room=s)
@@ -243,7 +241,6 @@ def handle_kick(data):
 
     emit('sys_msg', {'type': 'kicked', 'user': kicked_user, 'msg': msg}, room='group')
 
-    # Rotate & broadcast to remaining (O(n), but n small)
     for s in list(connections):
         if connections[s]['user_key'] is not None:
             enc_data = encrypt_message(new_key, connections[s]['user_key'])
