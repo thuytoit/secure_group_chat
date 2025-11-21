@@ -3,17 +3,22 @@ import os
 import json
 import logging
 import datetime
+import base64
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from flask import Flask, render_template, request, session, redirect, url_for, jsonify
+from flask import Flask, render_template, request, session, redirect, url_for, jsonify, send_file
 from flask_socketio import SocketIO, emit, join_room, leave_room
-from users import register, login, is_admin, logout, load_users
-from groups import GroupManager
+from werkzeug.utils import secure_filename
+from users import register, login, is_admin as is_global_admin, logout, load_users
+from rooms import room_manager
+import database as db
 from crypto import parameters, derive_key, encrypt_message
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.backends import default_backend
+import io
+import time
 
 # Load config
 CONFIG_PATH = Path(__file__).parent / 'config.json'
@@ -23,16 +28,22 @@ with open(CONFIG_PATH, 'r') as f:
 app = Flask(__name__)
 app.config['SECRET_KEY'] = config['secret_key']
 app.config['DEBUG'] = config.get('flask_debug', False)
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
-gm = GroupManager()
+UPLOAD_FOLDER = Path(__file__).parent / 'uploads'
+UPLOAD_FOLDER.mkdir(exist_ok=True)
+ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx', 'zip', 'mp4', 'mp3'}
+
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=20*1024*1024)
 
 logging.basicConfig(level=logging.INFO if app.config['DEBUG'] else logging.WARNING)
 logger = logging.getLogger(__name__)
 
 connections = {}
 active_sids = {}
+room_sids = {}
 backend = default_backend()
+file_storage = {}
 
 def get_username_from_token(token: str) -> str | None:
     users = load_users()
@@ -48,6 +59,39 @@ def require_auth():
     if 'token' not in session or not is_valid_user(session['token']):
         return redirect(url_for('index'))
     return None
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def broadcast_room_update():
+    """Broadcast room list update to all users"""
+    public_rooms = room_manager.list_public_rooms()
+    socketio.emit('room_list_update', {
+        'public_rooms': public_rooms
+    }, namespace='/')
+
+def broadcast_member_update(room_id: str):
+    """Broadcast updated member list to room"""
+    members = db.get_room_members(room_id)
+    socketio.emit('member_list_update', {
+        'members': [{
+            'username': m['username'],
+            'role': m['role'],
+            'joined_at': m['joined_at']
+        } for m in members]
+    }, room=room_id)
+
+def broadcast_reports_update():
+    """Broadcast updated reports to all connected clients"""
+    try:
+        pending_reports = room_manager.get_pending_reports()
+        socketio.emit('reports_updated', {
+            'pending_reports': pending_reports
+        })
+    except Exception as e:
+        logger.error(f"Report broadcast error: {e}")
+
+# ===== HTTP ROUTES =====
 
 @app.route('/')
 def index():
@@ -69,7 +113,8 @@ def do_login():
         session['token'] = token
         session['username'] = username
         session['role'] = role
-    return jsonify({'success': success, 'token': token, 'role': role, 'msg': 'Logged in' if success else 'Fail'})
+    return jsonify({'success': success, 'token': token, 'role': role, 
+                   'msg': 'Logged in' if success else 'Invalid credentials'})
 
 @app.route('/logout')
 def do_logout():
@@ -79,50 +124,309 @@ def do_logout():
     session.clear()
     return redirect(url_for('index'))
 
-@app.route('/chat')
-def chat():
+@app.route('/hub')
+def hub():
     redirect_to = require_auth()
     if redirect_to:
         return redirect_to
-    return render_template('chat.html', 
-                          username=session['username'], 
-                          role=session['role'], 
-                          token=session['token'],
-                          salt=config['salt'],
-                          iterations=config['iterations'],
-                          now=datetime.datetime.now(datetime.timezone.utc).isoformat())
+    
+    user_rooms = room_manager.list_user_rooms(session['username'])
+    public_rooms = room_manager.list_public_rooms()
+    
+    pending_reports = []
+    if is_global_admin(session['token']):
+        pending_reports = room_manager.get_pending_reports()
+    
+    return render_template('hub.html',
+                         username=session['username'],
+                         role=session['role'],
+                         user_rooms=user_rooms,
+                         public_rooms=public_rooms,
+                         pending_reports=pending_reports,
+                         is_global_admin=is_global_admin(session['token']))
+
+@app.route('/chat/<room_id>')
+def chat(room_id):
+    redirect_to = require_auth()
+    if redirect_to:
+        return redirect_to
+    
+    role = db.get_member_role(room_id, session['username'])
+    if not role:
+        return redirect(url_for('hub'))
+    
+    room_info = room_manager.get_room_info(room_id)
+    if not room_info:
+        return redirect(url_for('hub'))
+    
+    return render_template('chat.html',
+                         username=session['username'],
+                         role=session['role'],
+                         room_id=room_id,
+                         room_name=room_info['name'],
+                         room_description=room_info.get('description', ''),
+                         room_max_members=room_info.get('max_members', 50),
+                         room_role=role,
+                         room_type=room_info['type'],
+                         invite_code=room_info.get('invite_code', ''),
+                         token=session['token'],
+                         salt=config['salt'],
+                         iterations=config['iterations'],
+                         is_global_admin=is_global_admin(session['token']),
+                         now=datetime.datetime.now(datetime.timezone.utc).isoformat())
+
+@app.route('/api/rooms/create', methods=['POST'])
+def create_room_api():
+    if 'token' not in session or not is_valid_user(session['token']):
+        return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
+    
+    try:
+        data = request.json
+        name = data.get('name', '').strip()
+        room_type = data.get('type', 'public')
+        password = data.get('password', '').strip() if data.get('password') else None
+        description = data.get('description', '')
+        max_members = data.get('max_members', 50)
+        
+        if not name:
+            return jsonify({'success': False, 'msg': 'Room name required'})
+        
+        # Empty string becomes None
+        if password == '':
+            password = None
+        
+        success, room_id, msg = room_manager.create_room(
+            name=name,
+            creator=session['username'],
+            room_type=room_type,
+            password=password,
+            description=description,
+            max_members=max_members
+        )
+        
+        if success:
+            broadcast_room_update()
+        
+        return jsonify({'success': success, 'room_id': room_id, 'msg': msg})
+    except Exception as e:
+        logger.error(f"Create room error: {e}")
+        return jsonify({'success': False, 'msg': str(e)}), 500
+
+@app.route('/api/rooms/join', methods=['POST'])
+def join_room_api():
+    if 'token' not in session or not is_valid_user(session['token']):
+        return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
+    
+    data = request.json
+    room_id = data.get('room_id')
+    password = data.get('password')
+    invite_code = data.get('invite_code')
+    
+    success, key, msg = room_manager.join_room(
+        room_id=room_id,
+        username=session['username'],
+        password=password,
+        invite_code=invite_code
+    )
+    
+    if success:
+        broadcast_room_update()
+    
+    return jsonify({'success': success, 'msg': msg})
+
+@app.route('/api/rooms/<room_id>/edit', methods=['POST'])
+def edit_room_api(room_id):
+    if 'token' not in session or not is_valid_user(session['token']):
+        return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
+    
+    role = db.get_member_role(room_id, session['username'])
+    if role != 'admin' and not is_global_admin(session['token']):
+        return jsonify({'success': False, 'msg': 'Not authorized'}), 403
+    
+    try:
+        data = request.json
+        name = data.get('name', '').strip()
+        description = data.get('description', '').strip()
+        max_members = int(data.get('max_members', 50))
+        password = data.get('password', '').strip() if data.get('password') else None
+        
+        if not name:
+            return jsonify({'success': False, 'msg': 'Room name required'})
+        
+        # Empty string becomes None (remove password)
+        if password == '':
+            password = None
+        
+        success, msg = room_manager.edit_room(room_id, name, description, max_members, password)
+        
+        if success:
+            broadcast_room_update()
+            socketio.emit('room_updated', {
+                'room_id': room_id,
+                'name': name,
+                'description': description,
+                'max_members': max_members
+            }, room=room_id)
+        
+        return jsonify({'success': success, 'msg': msg})
+    except Exception as e:
+        logger.error(f"Edit room error: {e}")
+        return jsonify({'success': False, 'msg': str(e)}), 500
+
+@app.route('/api/rooms/<room_id>/report', methods=['POST'])
+def report_room(room_id):
+    if 'token' not in session or not is_valid_user(session['token']):
+        return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
+    
+    try:
+        data = request.json
+        reason = data.get('reason', '').strip()
+        details = data.get('details', '').strip()
+        
+        if not reason:
+            return jsonify({'success': False, 'msg': 'Reason required'})
+        
+        success, msg = room_manager.create_report(room_id, session['username'], reason, details)
+        
+        if success:
+            broadcast_reports_update()
+        
+        return jsonify({'success': success, 'msg': msg})
+    except Exception as e:
+        logger.error(f"Report error: {e}")
+        return jsonify({'success': False, 'msg': str(e)}), 500
+
+@app.route('/api/reports/<int:report_id>/resolve', methods=['POST'])
+def resolve_report_api(report_id):
+    if 'token' not in session or not is_global_admin(session['token']):
+        return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
+    
+    try:
+        data = request.json
+        status = data.get('status', 'resolved')
+        
+        success, msg = room_manager.resolve_report(report_id, session['username'], status)
+        
+        if success:
+            broadcast_reports_update()
+        
+        return jsonify({'success': success, 'msg': msg})
+    except Exception as e:
+        logger.error(f"Resolve report error: {e}")
+        return jsonify({'success': False, 'msg': str(e)}), 500
+
+@app.route('/api/rooms/<room_id>/delete', methods=['POST'])
+def delete_room_api(room_id):
+    if 'token' not in session:
+        return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
+    
+    role = db.get_member_role(room_id, session['username'])
+    if role != 'admin' and not is_global_admin(session['token']):
+        return jsonify({'success': False, 'msg': 'Not authorized'}), 403
+    
+    success, msg = room_manager.delete_room(room_id, session['token'])
+    
+    if success:
+        broadcast_room_update()
+        socketio.emit('room_deleted', {'room_id': room_id, 'msg': 'Room deleted'}, room=room_id)
+    
+    return jsonify({'success': success, 'msg': msg})
+
+@app.route('/api/rooms/search', methods=['GET'])
+def search_rooms_api():
+    if 'token' not in session or not is_valid_user(session['token']):
+        return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
+    
+    query = request.args.get('q', '').strip().lower()
+    invite_code = request.args.get('invite', '').strip()
+    
+    if invite_code:
+        room = room_manager.find_room_by_invite(invite_code)
+        if room:
+            return jsonify({'success': True, 'rooms': [room]})
+        return jsonify({'success': False, 'msg': 'Invalid invite code', 'rooms': []})
+    
+    rooms = room_manager.search_public_rooms(query)
+    return jsonify({'success': True, 'rooms': rooms})
+
+@app.route('/api/files/<file_id>')
+def download_file(file_id):
+    if 'token' not in session or not is_valid_user(session['token']):
+        return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
+    
+    if file_id not in file_storage:
+        return jsonify({'success': False, 'msg': 'File not found'}), 404
+    
+    file_data = file_storage[file_id]
+    return send_file(
+        io.BytesIO(file_data['data']),
+        download_name=file_data['filename'],
+        mimetype=file_data['content_type']
+    )
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'users': len(load_users())})
+    return jsonify({'status': 'ok', 'users': len(load_users()), 'rooms': len(db.list_public_rooms())})
+
+# ===== SOCKET.IO HANDLERS =====
 
 @socketio.on('connect')
 def handle_connect(auth):
     token = auth.get('token')
+    room_id = auth.get('room_id')
+    
     if not token or not is_valid_user(token):
         emit('error', {'msg': 'Invalid session'})
         return False
-
+    
     username = get_username_from_token(token)
     sid = request.sid
-
+    
+    if not room_id:
+        connections[sid] = {
+            'username': username,
+            'token': token,
+            'room_id': None
+        }
+        join_room('hub')
+        return
+    
+    role = db.get_member_role(room_id, username)
+    if not role:
+        emit('error', {'msg': 'Not a member of this room'})
+        return False
+    
+    # Force disconnect old sessions in same room
     if username in active_sids:
         for old_sid in active_sids[username][:]:
-            emit('force_disconnect', room=old_sid)
-            if old_sid in connections:
-                del connections[old_sid]
-    active_sids[username] = [sid]
-
+            if old_sid in connections and connections[old_sid].get('room_id') == room_id:
+                emit('force_disconnect', room=old_sid)
+                if old_sid in connections:
+                    del connections[old_sid]
+                if room_id in room_sids and old_sid in room_sids[room_id]:
+                    room_sids[room_id].remove(old_sid)
+    
+    if username not in active_sids:
+        active_sids[username] = []
+    active_sids[username].append(sid)
+    
+    if room_id not in room_sids:
+        room_sids[room_id] = []
+    room_sids[room_id].append(sid)
+    
     connections[sid] = {
         'username': username,
         'token': token,
+        'room_id': room_id,
         'user_key': None,
-        'priv_key': None
+        'priv_key': None,
+        'key_ready': False
     }
-
-    join_room('group')
-    logger.info(f"[CONNECT] {username} ({sid})")
-
+    
+    join_room(room_id)
+    logger.info(f"[CONNECT] {username} joined room {room_id} ({sid})")
+    
+    # Start DH key exchange
     param_nums = parameters.parameter_numbers()
     p, g = param_nums.p, param_nums.g
     priv_exp = int.from_bytes(os.urandom((p.bit_length() + 7) // 8), 'big') % (p - 2) + 2
@@ -131,7 +435,7 @@ def handle_connect(auth):
     priv_key = priv_numbers.private_key(backend)
     pub_key = priv_key.public_key()
     pub_num = pub_key.public_numbers()
-
+    
     connections[sid]['priv_key'] = priv_key
     pub_bytes = pub_num.y.to_bytes((pub_num.y.bit_length() + 7) // 8, 'big')
     emit('dh_pub', {'pub': pub_bytes.hex()})
@@ -143,125 +447,341 @@ def handle_dh_peer(data):
     if sid not in connections:
         emit('error', {'msg': 'Session lost'})
         return
-
+    
     try:
         priv_key = connections[sid]['priv_key']
         if not priv_key:
             raise ValueError('Key exchange failed')
-
+        
         pub_hex = data.get('pub', '')
         peer_pub_bytes = bytes.fromhex(pub_hex)
         param_nums = parameters.parameter_numbers()
         p = param_nums.p
         peer_pub_int = int.from_bytes(peer_pub_bytes, 'big')
-
+        
         if not (1 < peer_pub_int < p):
             raise ValueError('Invalid public key')
-
+        
         peer_pub_num = dh.DHPublicNumbers(peer_pub_int, param_nums)
         peer_pub_key = peer_pub_num.public_key(backend)
-
-        shared = priv_key.exchange(peer_pub_key)
         
-        # FIX: Pad shared secret to 256 bytes to match client
-        # Client pads to HEX_LEN (512 hex chars = 256 bytes)
-        shared_padded = shared.rjust(256, b'\x00')  # Pad with leading zeros
-        logger.info(f"[DH] Shared secret length: {len(shared)} -> {len(shared_padded)} bytes")
+        shared = priv_key.exchange(peer_pub_key)
+        shared_padded = shared.rjust(256, b'\x00')
         
         user_key = derive_key(shared_padded)
         connections[sid]['user_key'] = user_key
+        connections[sid]['key_ready'] = True
         logger.info(f"[DH] Exchange complete for {sid}")
     except Exception as e:
         logger.error(f"[DH] Failed for {sid}: {e}")
         emit('error', {'msg': 'Key exchange failed'})
         return
-
-    group = gm.groups.get('main_group', {})
-    group_key = group.get('key')
-    version = group.get('version', 0)
-
-    if group_key:
-        enc_data = encrypt_message(group_key, user_key)
+    
+    room_id = connections[sid]['room_id']
+    room_key, version = room_manager.get_room_key(room_id)
+    
+    if room_key:
+        enc_data = encrypt_message(room_key, user_key)
         emit('group_key', {'enc': enc_data.hex(), 'version': version, 'status': 'initial'})
-        logger.info(f"[KEY] Sent v{version} to {sid}")
-
+        logger.info(f"[KEY] Sent v{version} to {sid} for room {room_id}")
+    
     username = connections[sid]['username']
-    success, _, _ = gm.add_user(username, connections[sid]['token'])
-    emit('sys_msg', {'type': 'joined', 'user': username}, room='group', skip_sid=sid)
-    logger.info(f"[SYS] {username} joined")
-
+    emit('sys_msg', {'type': 'joined', 'user': username}, room=room_id, include_self=False)
+    
+    # Broadcast updated member list
+    broadcast_member_update(room_id)
+    
+    # Send message history with longer delay to ensure key is processed
+    def send_history():
+        time.sleep(1.0)  # Increased delay for stability
+        try:
+            members = db.get_room_members(room_id)
+            user_member = next((m for m in members if m['username'] == username), None)
+            if user_member:
+                first_join = user_member['first_join_at']
+                messages = db.get_messages(room_id, first_join, limit=100)
+                
+                socketio.emit('message_history', {
+                    'messages': [{
+                        'id': msg['id'],
+                        'sender': msg['sender'],
+                        'enc': msg['encrypted_content'],
+                        'timestamp': msg['timestamp'],
+                        'key_version': msg['key_version'],
+                        'reactions': msg['reactions'],
+                        'file_metadata': msg['file_metadata']
+                    } for msg in messages]
+                }, room=sid)
+                logger.info(f"[HISTORY] Sent {len(messages)} messages to {username}")
+        except Exception as e:
+            logger.error(f"[HISTORY] Error: {e}")
+    
+    import threading
+    threading.Thread(target=send_history).start()
+    
     connections[sid]['priv_key'] = None
 
 @socketio.on('message')
 def handle_message(data):
     sid = request.sid
-    if sid not in connections or connections[sid]['user_key'] is None:
+    if sid not in connections:
+        emit('error', {'msg': 'Not connected'})
+        return
+    
+    if not connections[sid].get('key_ready') or connections[sid]['user_key'] is None:
         emit('error', {'msg': 'Key not ready'})
         return
-
+    
     conn = connections[sid]
     if not is_valid_user(conn['token']):
         emit('error', {'msg': 'Session expired'})
         return
-
+    
     username = conn['username']
+    room_id = conn['room_id']
     enc_msg = data.get('enc', '')
+    file_metadata = data.get('file_metadata')
+    
+    _, key_version = room_manager.get_room_key(room_id)
+    
+    msg_id = db.save_message(room_id, username, enc_msg, key_version, file_metadata)
+    
+    emit('encrypted_msg', {
+        'id': msg_id,
+        'sender': username,
+        'enc': enc_msg,
+        'timestamp': datetime.datetime.now().timestamp(),
+        'key_version': key_version,
+        'file_metadata': file_metadata,
+        'reactions': {}
+    }, room=room_id, include_self=True)
+    
+    logger.info(f"[MSG] {username} in {room_id}, broadcast to room")
 
-    emit('encrypted_msg', {'sender': username, 'enc': enc_msg}, room='group', skip_sid=sid)
-    logger.info(f"[MSG] {username}")
+@socketio.on('load_more_messages')
+def handle_load_more(data):
+    sid = request.sid
+    if sid not in connections:
+        return
+    
+    room_id = connections[sid]['room_id']
+    username = connections[sid]['username']
+    before_id = data.get('before_id')
+    
+    members = db.get_room_members(room_id)
+    user_member = next((m for m in members if m['username'] == username), None)
+    if not user_member:
+        return
+    
+    first_join = user_member['first_join_at']
+    messages = db.get_messages(room_id, first_join, limit=50, before_id=before_id)
+    
+    emit('more_messages', {
+        'messages': [{
+            'id': msg['id'],
+            'sender': msg['sender'],
+            'enc': msg['encrypted_content'],
+            'timestamp': msg['timestamp'],
+            'key_version': msg['key_version'],
+            'reactions': msg['reactions'],
+            'file_metadata': msg['file_metadata']
+        } for msg in messages]
+    })
 
-@socketio.on('admin_kick')
+@socketio.on('upload_file')
+def handle_file_upload(data):
+    sid = request.sid
+    if sid not in connections:
+        emit('upload_error', {'msg': 'Not connected'})
+        return
+    
+    try:
+        file_data = base64.b64decode(data['file_data'])
+        filename = secure_filename(data['filename'])
+        content_type = data.get('content_type', 'application/octet-stream')
+        
+        if len(file_data) > 16 * 1024 * 1024:
+            emit('upload_error', {'msg': 'File too large (max 16MB)'})
+            return
+        
+        if not allowed_file(filename):
+            emit('upload_error', {'msg': 'File type not allowed'})
+            return
+        
+        import secrets
+        file_id = f"file_{secrets.token_hex(16)}"
+        
+        file_storage[file_id] = {
+            'data': file_data,
+            'filename': filename,
+            'content_type': content_type,
+            'uploader': connections[sid]['username'],
+            'size': len(file_data)
+        }
+        
+        emit('file_uploaded', {
+            'file_id': file_id,
+            'filename': filename,
+            'size': len(file_data),
+            'content_type': content_type
+        })
+        
+        logger.info(f"[FILE] Uploaded {filename} ({len(file_data)} bytes) - ID: {file_id}")
+    except Exception as e:
+        logger.error(f"[FILE] Upload error: {e}")
+        emit('upload_error', {'msg': f'File upload failed: {str(e)}'})
+
+@socketio.on('delete_message')
+def handle_delete_message(data):
+    sid = request.sid
+    if sid not in connections:
+        return
+    
+    msg_id = data.get('message_id')
+    username = connections[sid]['username']
+    room_id = connections[sid]['room_id']
+    token = connections[sid]['token']
+    
+    msg_info = db.get_message_sender(msg_id)
+    if not msg_info or msg_info['room_id'] != room_id:
+        emit('error', {'msg': 'Message not found'})
+        return
+    
+    is_sender = msg_info['sender'] == username
+    is_room_admin = db.get_member_role(room_id, username) == 'admin'
+    is_global = is_global_admin(token)
+    
+    if not (is_sender or is_room_admin or is_global):
+        emit('error', {'msg': 'Not authorized'})
+        return
+    
+    success = db.delete_message(msg_id, username)
+    if success:
+        emit('message_deleted', {'message_id': msg_id, 'deleted_by': username}, room=room_id, include_self=True)
+        logger.info(f"[DELETE] Message {msg_id} deleted by {username}")
+
+@socketio.on('react')
+def handle_reaction(data):
+    sid = request.sid
+    if sid not in connections:
+        return
+    
+    msg_id = data.get('message_id')
+    emoji = data.get('emoji')
+    action = data.get('action', 'add')
+    username = connections[sid]['username']
+    room_id = connections[sid]['room_id']
+    
+    if action == 'add':
+        success = db.add_reaction(msg_id, username, emoji)
+    else:
+        success = db.remove_reaction(msg_id, username, emoji)
+    
+    if success:
+        msg_reactions = db.get_message_reactions(msg_id)
+        
+        emit('reaction_update', {
+            'message_id': msg_id,
+            'emoji': emoji,
+            'username': username,
+            'action': action,
+            'all_reactions': msg_reactions
+        }, room=room_id, include_self=True)
+        
+        logger.info(f"[REACT] {username} {action}ed {emoji} to msg {msg_id}")
+
+@socketio.on('kick_user')
 def handle_kick(data):
     sid = request.sid
     if sid not in connections:
         return
-
+    
     conn = connections[sid]
-    if not is_admin(conn['token']):
-        emit('error', {'msg': 'Not authorized'})
-        return
-
+    room_id = conn['room_id']
     kicked_user = data.get('user', '')
-    success, new_key, msg = gm.kick_user(kicked_user, conn['token'])
-
+    
+    success, new_key, msg = room_manager.kick_user(room_id, conn['token'], kicked_user)
+    
     if not success:
         emit('error', {'msg': msg})
         return
-
-    logger.info(f"[KICK] {kicked_user} kicked")
-    new_version = gm.groups['main_group'].get('version', 0)
-
+    
+    logger.info(f"[KICK] {kicked_user} kicked from {room_id}")
+    _, new_version = room_manager.get_room_key(room_id)
+    
+    # Kick user out
     if kicked_user in active_sids:
         for s in active_sids[kicked_user][:]:
-            emit('kicked', {'msg': msg}, room=s)
-            leave_room('group', s)
-            if s in connections:
-                del connections[s]
-        active_sids[kicked_user] = []
-
-    emit('sys_msg', {'type': 'kicked', 'user': kicked_user, 'msg': msg}, room='group')
-
+            if s in connections and connections[s].get('room_id') == room_id:
+                emit('kicked', {'msg': msg}, room=s)
+                leave_room(room_id, s)
+                if room_id in room_sids and s in room_sids[room_id]:
+                    room_sids[room_id].remove(s)
+                if s in connections:
+                    del connections[s]
+        active_sids[kicked_user] = [s for s in active_sids.get(kicked_user, []) if s not in connections or connections[s].get('room_id') != room_id]
+    
+    # Notify room
+    emit('sys_msg', {'type': 'kicked', 'user': kicked_user, 'msg': msg}, room=room_id, include_self=True)
+    
+    # Send new key to all remaining members
     for s in list(connections):
-        if connections[s]['user_key'] is not None:
+        if connections[s].get('room_id') == room_id and connections[s].get('user_key') is not None:
             enc_data = encrypt_message(new_key, connections[s]['user_key'])
             emit('group_key', {'enc': enc_data.hex(), 'version': new_version, 'status': 'rotated'}, room=s)
+            connections[s]['key_ready'] = True
+    
+    broadcast_room_update()
+    broadcast_member_update(room_id)
+    logger.info(f"[KEY] Rotated to v{new_version} in room {room_id}")
 
-    logger.info(f"[KEY] Rotated to v{new_version}, sent to {len(connections)} users")
+@socketio.on('leave_room')
+def handle_leave_room():
+    sid = request.sid
+    if sid not in connections:
+        return
+    
+    username = connections[sid]['username']
+    room_id = connections[sid]['room_id']
+    
+    success, new_admin, msg = room_manager.leave_room(room_id, username)
+    
+    if success:
+        if new_admin:
+            emit('sys_msg', {'type': 'admin_transfer', 'user': new_admin, 'msg': f'{new_admin} is now admin'}, room=room_id, include_self=True)
+        
+        emit('sys_msg', {'type': 'left', 'user': username, 'msg': f'{username} left'}, room=room_id, include_self=False)
+        leave_room(room_id, sid)
+        
+        if room_id in room_sids and sid in room_sids[room_id]:
+            room_sids[room_id].remove(sid)
+        
+        emit('room_left', {'msg': msg})
+        broadcast_room_update()
+        broadcast_member_update(room_id)
+        
+        logger.info(f"[LEAVE] {username} left {room_id}")
 
 @socketio.on('disconnect')
 def handle_disconnect():
     sid = request.sid
     if sid in connections:
         username = connections[sid]['username']
+        room_id = connections[sid].get('room_id')
+        
         if username in active_sids:
-            active_sids[username].remove(sid)
+            active_sids[username] = [s for s in active_sids[username] if s != sid]
             if not active_sids[username]:
                 del active_sids[username]
+        
+        if room_id:
+            if room_id in room_sids and sid in room_sids[room_id]:
+                room_sids[room_id].remove(sid)
+            emit('sys_msg', {'type': 'disconnected', 'user': username}, room=room_id, include_self=False)
+            leave_room(room_id, sid)
+        
         del connections[sid]
-        emit('sys_msg', {'type': 'disconnected', 'user': username}, room='group')
         logger.info(f"[DISCONNECT] {username}")
-
-    leave_room('group', sid)
 
 if __name__ == '__main__':
     host = config.get('host', 'localhost')

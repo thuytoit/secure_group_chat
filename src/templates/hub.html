@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Chat Hub - {{ username }}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .header {
+      background: white;
+      padding: 20px;
+      border-radius: 12px;
+      margin-bottom: 20px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .header h1 { color: #333; font-size: 24px; }
+    .header .user-info { color: #666; font-size: 14px; }
+    .header .actions { display: flex; gap: 10px; }
+    .btn {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      transition: all 0.3s;
+    }
+    .btn-primary { background: #667eea; color: white; }
+    .btn-primary:hover { background: #5568d3; }
+    .btn-secondary { background: #f3f4f6; color: #333; }
+    .btn-secondary:hover { background: #e5e7eb; }
+    .btn-danger { background: #ef4444; color: white; }
+    .btn-danger:hover { background: #dc2626; }
+    .tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .tab {
+      padding: 12px 24px;
+      background: white;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 500;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      transition: all 0.3s;
+    }
+    .tab:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15); }
+    .tab.active { background: #667eea; color: white; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    .section {
+      background: white;
+      padding: 24px;
+      border-radius: 12px;
+      margin-bottom: 20px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    .section h2 {
+      color: #333;
+      font-size: 20px;
+      margin-bottom: 16px;
+      border-bottom: 2px solid #667eea;
+      padding-bottom: 8px;
+    }
+    .empty-state {
+      text-align: center;
+      padding: 40px;
+      color: #999;
+    }
+    .room-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 16px;
+    }
+    .room-card {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 16px;
+      cursor: pointer;
+      transition: all 0.3s;
+      position: relative;
+    }
+    .room-card:hover {
+      border-color: #667eea;
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
+      transform: translateY(-2px);
+    }
+    .room-card .room-name {
+      font-size: 18px;
+      font-weight: 600;
+      color: #333;
+      margin-bottom: 8px;
+    }
+    .room-card .room-desc {
+      font-size: 14px;
+      color: #666;
+      margin-bottom: 12px;
+      min-height: 40px;
+    }
+    .room-card .room-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      color: #999;
+    }
+    .room-badge {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .badge-public { background: #dcfce7; color: #16a34a; }
+    .badge-private { background: #fee2e2; color: #dc2626; }
+    .badge-admin { background: #fef3c7; color: #d97706; }
+    .modal {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal.active { display: flex; }
+    .modal-content {
+      background: white;
+      padding: 32px;
+      border-radius: 12px;
+      max-width: 500px;
+      width: 90%;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+    .modal-content h3 {
+      margin-bottom: 20px;
+      color: #333;
+    }
+    .form-group {
+      margin-bottom: 16px;
+    }
+    .form-group label {
+      display: block;
+      margin-bottom: 6px;
+      font-weight: 500;
+      color: #333;
+      font-size: 14px;
+    }
+    .form-group input, .form-group textarea, .form-group select {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      font-size: 14px;
+    }
+    .form-group textarea {
+      resize: vertical;
+      min-height: 80px;
+    }
+    .form-actions {
+      display: flex;
+      gap: 10px;
+      justify-content: flex-end;
+      margin-top: 24px;
+    }
+    .password-toggle {
+      position: absolute;
+      right: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      border: none;
+      background: none;
+      cursor: pointer;
+      font-size: 18px;
+    }
+    .input-with-toggle {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+    .report-item {
+      padding: 12px;
+      background: #fef3c7;
+      border-radius: 6px;
+      margin-bottom: 12px;
+      border-left: 4px solid #d97706;
+    }
+    .report-item .report-header {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+    .report-item .report-details {
+      font-size: 13px;
+      color: #666;
+      margin-bottom: 8px;
+    }
+    .report-actions {
+      display: flex;
+      gap: 8px;
+    }
+    .hint-text {
+      font-size: 11px;
+      color: #999;
+      margin-top: 4px;
+    }
+    .info-box {
+      background: #dbeafe;
+      padding: 12px;
+      border-radius: 6px;
+      margin-top: 12px;
+      font-size: 13px;
+      color: #1e40af;
+    }
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .checkbox-group input[type="checkbox"] {
+      width: auto;
+      cursor: pointer;
+    }
+    .checkbox-group label {
+      margin: 0;
+      cursor: pointer;
+      font-weight: normal;
+    }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div>
+        <h1>🏠 Chat Hub</h1>
+        <div class="user-info">
+          Welcome, <strong>{{ username }}</strong>
+          {% if is_global_admin %}
+          <span class="room-badge badge-admin">Global Admin</span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" onclick="showCreateModal()">+ Create Room</button>
+        <button class="btn btn-secondary" onclick="showSearchModal()">🔍 Search</button>
+        <a href="/logout" class="btn btn-secondary">Logout</a>
+      </div>
+    </div>
+
+    {% if is_global_admin %}
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('rooms')">Rooms</div>
+      <div class="tab" onclick="switchTab('reports')" id="reportsTab">
+        Reports <span id="reportCount" style="background: #ef4444; color: white; padding: 2px 6px; border-radius: 10px; font-size: 11px;">{{ pending_reports|length }}</span>
+      </div>
+    </div>
+    {% endif %}
+
+    <div id="roomsTab" class="tab-content active">
+      <div class="section">
+        <h2>💬 Your Rooms ({{ user_rooms|length }})</h2>
+        {% if user_rooms %}
+        <div class="room-grid">
+          {% for room in user_rooms %}
+          <div class="room-card" onclick="joinRoom('{{ room.id }}')">
+            <div class="room-name">{{ room.name }}</div>
+            <div class="room-desc">{{ room.description or 'No description' }}</div>
+            <div class="room-meta">
+              <div>
+                <span class="room-badge badge-{{ room.type }}">{{ room.type }}</span>
+                {% if room.role == 'admin' %}
+                <span class="room-badge badge-admin">Admin</span>
+                {% endif %}
+              </div>
+              <div>👥 {{ room.member_count }} members</div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" style="width: 64px; height: 64px; margin: 0 auto 16px; opacity: 0.5;">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+          </svg>
+          <p>No rooms yet. Create one or join a public room!</p>
+        </div>
+        {% endif %}
+      </div>
+
+      <div class="section">
+        <h2>🌐 Public Rooms</h2>
+        <div class="room-grid" id="publicRoomsList">
+          {% if public_rooms %}
+            {% for room in public_rooms %}
+            <div class="room-card" onclick="joinRoomDirect('{{ room.id }}')">
+              <div class="room-name">{{ room.name }}</div>
+              <div class="room-desc">{{ room.description or 'No description' }}</div>
+              <div class="room-meta">
+                <div>
+                  <span class="room-badge badge-public">Public</span>
+                  <span style="font-size: 11px; color: #999;">by {{ room.creator }}</span>
+                </div>
+                <div>👥 {{ room.member_count }}/{{ room.max_members }}</div>
+              </div>
+            </div>
+            {% endfor %}
+          {% else %}
+          <div class="empty-state">
+            <p>No public rooms available. Be the first to create one!</p>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    {% if is_global_admin %}
+    <div id="reportsTabContent" class="tab-content">
+      <div class="section">
+        <h2>⚠️ Pending Reports</h2>
+        <div id="reportsList">
+          {% if pending_reports %}
+            {% for report in pending_reports %}
+            <div class="report-item" data-report-id="{{ report.id }}">
+              <div class="report-header">
+                <span>{{ report.reason }}</span>
+                <span style="font-size: 12px; color: #999;">{{ report.reporter }}</span>
+              </div>
+              <div class="report-details">
+                <strong>Room:</strong> {{ report.room_name }}<br>
+                <strong>Details:</strong> {{ report.details or 'No additional details' }}
+              </div>
+              <div class="report-actions">
+                <button class="btn btn-secondary" onclick="resolveReport({{ report.id }})">Resolve</button>
+                <button class="btn btn-danger" onclick="deleteReportedRoom('{{ report.room_id }}', {{ report.id }})">Delete Room</button>
+              </div>
+            </div>
+            {% endfor %}
+          {% else %}
+          <div class="empty-state">
+            <p>✅ No pending reports. All good!</p>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Create Room Modal -->
+  <div id="createModal" class="modal">
+    <div class="modal-content">
+      <h3>Create New Room</h3>
+      <form id="createForm" onsubmit="createRoom(event)">
+        <div class="form-group">
+          <label>Room Name *</label>
+          <input type="text" name="name" required maxlength="50" placeholder="My Awesome Room">
+        </div>
+        <div class="form-group">
+          <label>Description</label>
+          <textarea name="description" placeholder="What's this room about?"></textarea>
+        </div>
+        <div class="form-group">
+          <label>Room Type</label>
+          <select name="type" id="roomTypeSelect" onchange="togglePrivateOptions(this.value)">
+            <option value="public">Public (Anyone can join)</option>
+            <option value="private">Private (Requires invite link)</option>
+          </select>
+        </div>
+        <div class="form-group" id="privateOptionsGroup" style="display: none;">
+          <div class="info-box">
+            💡 Private rooms ALWAYS get an invite link. You can also add a password for extra security.
+          </div>
+          <div class="checkbox-group">
+            <input type="checkbox" id="usePassword" name="use_password">
+            <label for="usePassword">Require Password</label>
+          </div>
+          <div id="passwordInputGroup" style="display: none; margin-top: 8px;">
+            <div class="input-with-toggle">
+              <input type="password" id="createRoomPassword" name="password" placeholder="Enter password" style="padding-right: 40px;">
+              <button type="button" class="password-toggle" onclick="togglePasswordVisibility('createRoomPassword', this)">
+                👁️
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Max Members</label>
+          <input type="number" name="max_members" value="50" min="2" max="500">
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-secondary" onclick="closeCreateModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary">Create Room</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Search Modal -->
+  <div id="searchModal" class="modal">
+    <div class="modal-content">
+      <h3>Search Rooms</h3>
+      <div class="form-group">
+        <label>Search by Name (Public Rooms)</label>
+        <input type="text" id="searchName" placeholder="Enter room name">
+        <button type="button" class="btn btn-primary" onclick="searchByName()" style="margin-top: 8px; width: 100%;">Search</button>
+      </div>
+      <div class="form-group" style="margin-top: 20px;">
+        <label>Or Join by Invite Link</label>
+        <input type="text" id="searchInvite" placeholder="Paste invite link here">
+        <button type="button" class="btn btn-primary" onclick="searchByInvite()" style="margin-top: 8px; width: 100%;">Join</button>
+      </div>
+      <div id="searchResults" style="margin-top: 20px;"></div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeSearchModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Password Prompt Modal -->
+  <div id="passwordPromptModal" class="modal">
+    <div class="modal-content">
+      <h3>🔒 Password Required</h3>
+      <p style="margin-bottom: 16px; color: #666;">This room is password-protected. Enter the password to join.</p>
+      <div class="form-group">
+        <label>Password</label>
+        <div class="input-with-toggle">
+          <input type="password" id="passwordPromptInput" placeholder="Enter room password" style="padding-right: 40px;">
+          <button type="button" class="password-toggle" onclick="togglePasswordVisibility('passwordPromptInput', this)">
+            👁️
+          </button>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closePasswordPrompt()">Cancel</button>
+        <button type="button" class="btn btn-primary" onclick="submitPassword()">Join</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const TOKEN = '{{ session.token }}';
+    const USERNAME = '{{ username }}';
+    const IS_ADMIN = {{ is_global_admin|tojson }};
+    
+    let currentPasswordRoomId = null;
+    let currentInviteCode = null;
+    
+    const socket = io({ auth: { token: TOKEN } });
+    
+    socket.on('connect', () => {
+      console.log('Connected to hub for live updates');
+    });
+    
+    socket.on('room_list_update', (data) => {
+      console.log('Room list updated');
+      updatePublicRoomsList(data.public_rooms);
+    });
+    
+    socket.on('reports_updated', (data) => {
+      if (IS_ADMIN) {
+        updateReportsList(data.pending_reports);
+      }
+    });
+    
+    function updatePublicRoomsList(rooms) {
+      const container = document.getElementById('publicRoomsList');
+      if (!container) return;
+      
+      container.innerHTML = '';
+      
+      if (!rooms || rooms.length === 0) {
+        container.innerHTML = '<div class="empty-state"><p>No public rooms available.</p></div>';
+        return;
+      }
+      
+      rooms.forEach(room => {
+        const card = document.createElement('div');
+        card.className = 'room-card';
+        card.onclick = () => joinRoomDirect(room.id);
+        card.innerHTML = `
+          <div class="room-name">${escapeHtml(room.name)}</div>
+          <div class="room-desc">${escapeHtml(room.description || 'No description')}</div>
+          <div class="room-meta">
+            <div>
+              <span class="room-badge badge-public">Public</span>
+              <span style="font-size: 11px; color: #999;">by ${escapeHtml(room.creator)}</span>
+            </div>
+            <div>👥 ${room.member_count}/${room.max_members}</div>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+    
+    function updateReportsList(reports) {
+      const container = document.getElementById('reportsList');
+      const count = document.getElementById('reportCount');
+      
+      if (count) {
+        count.textContent = reports.length;
+        count.style.display = reports.length > 0 ? 'inline-block' : 'none';
+      }
+      
+      if (!container) return;
+      
+      container.innerHTML = '';
+      
+      if (!reports || reports.length === 0) {
+        container.innerHTML = '<div class="empty-state"><p>✅ No pending reports. All good!</p></div>';
+        return;
+      }
+      
+      reports.forEach(report => {
+        const item = document.createElement('div');
+        item.className = 'report-item';
+        item.dataset.reportId = report.id;
+        item.innerHTML = `
+          <div class="report-header">
+            <span>${escapeHtml(report.reason)}</span>
+            <span style="font-size: 12px; color: #999;">${escapeHtml(report.reporter)}</span>
+          </div>
+          <div class="report-details">
+            <strong>Room:</strong> ${escapeHtml(report.room_name)}<br>
+            <strong>Details:</strong> ${escapeHtml(report.details || 'No additional details')}
+          </div>
+          <div class="report-actions">
+            <button class="btn btn-secondary" onclick="resolveReport(${report.id})">Resolve</button>
+            <button class="btn btn-danger" onclick="deleteReportedRoom('${report.room_id}', ${report.id})">Delete Room</button>
+          </div>
+        `;
+        container.appendChild(item);
+      });
+    }
+    
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text || '';
+      return div.innerHTML;
+    }
+
+    function switchTab(tabName) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      event.target.classList.add('active');
+      
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      
+      if (tabName === 'rooms') {
+        document.getElementById('roomsTab').classList.add('active');
+      } else if (tabName === 'reports') {
+        const reportsContent = document.getElementById('reportsTabContent');
+        if (reportsContent) {
+          reportsContent.classList.add('active');
+        }
+      }
+    }
+
+    function showCreateModal() {
+      document.getElementById('createModal').classList.add('active');
+    }
+
+    function closeCreateModal() {
+      document.getElementById('createModal').classList.remove('active');
+      document.getElementById('createForm').reset();
+      document.getElementById('privateOptionsGroup').style.display = 'none';
+      document.getElementById('passwordInputGroup').style.display = 'none';
+      document.getElementById('usePassword').checked = false;
+    }
+
+    function togglePrivateOptions(type) {
+      const optionsGroup = document.getElementById('privateOptionsGroup');
+      optionsGroup.style.display = type === 'private' ? 'block' : 'none';
+    }
+
+    document.getElementById('usePassword').addEventListener('change', function() {
+      document.getElementById('passwordInputGroup').style.display = this.checked ? 'block' : 'none';
+    });
+
+    function togglePasswordVisibility(inputId, button) {
+      const input = document.getElementById(inputId);
+      if (input.type === 'password') {
+        input.type = 'text';
+        button.textContent = '🙈';
+      } else {
+        input.type = 'password';
+        button.textContent = '👁️';
+      }
+    }
+
+    async function createRoom(e) {
+      e.preventDefault();
+      const form = e.target;
+      const formData = new FormData(form);
+      
+      const usePassword = document.getElementById('usePassword').checked;
+      const password = usePassword ? document.getElementById('createRoomPassword').value : null;
+      
+      const data = {
+        name: formData.get('name'),
+        type: formData.get('type'),
+        description: formData.get('description'),
+        password: password || null,
+        max_members: parseInt(formData.get('max_members'))
+      };
+
+      try {
+        const res = await fetch('/api/rooms/create', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(data)
+        });
+        const result = await res.json();
+        
+        if (result.success) {
+          closeCreateModal();
+          window.location.href = `/chat/${result.room_id}`;
+        } else {
+          alert(result.msg || 'Failed to create room');
+        }
+      } catch (err) {
+        alert('Error creating room: ' + err.message);
+        console.error(err);
+      }
+    }
+
+    function joinRoom(roomId) {
+      window.location.href = `/chat/${roomId}`;
+    }
+
+    async function joinRoomDirect(roomId) {
+      try {
+        const res = await fetch('/api/rooms/join', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({room_id: roomId})
+        });
+        const result = await res.json();
+        
+        if (result.success) {
+          window.location.href = `/chat/${roomId}`;
+        } else if (result.msg && result.msg.includes('Password required')) {
+          showPasswordPrompt(roomId, null);
+        } else {
+          alert(result.msg || 'Failed to join room');
+        }
+      } catch (err) {
+        alert('Error joining room');
+        console.error(err);
+      }
+    }
+
+    function showSearchModal() {
+      document.getElementById('searchModal').classList.add('active');
+    }
+
+    function closeSearchModal() {
+      document.getElementById('searchModal').classList.remove('active');
+      document.getElementById('searchName').value = '';
+      document.getElementById('searchInvite').value = '';
+      document.getElementById('searchResults').innerHTML = '';
+    }
+
+    async function searchByName() {
+      const query = document.getElementById('searchName').value.trim();
+      if (!query) {
+        alert('Please enter a search term');
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/rooms/search?q=${encodeURIComponent(query)}`);
+        const result = await res.json();
+        
+        displaySearchResults(result.rooms || []);
+      } catch (err) {
+        alert('Error searching rooms');
+        console.error(err);
+      }
+    }
+
+    async function searchByInvite() {
+      const invite = document.getElementById('searchInvite').value.trim();
+      if (!invite) {
+        alert('Please enter an invite link');
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/rooms/search?invite=${encodeURIComponent(invite)}`);
+        const result = await res.json();
+        
+        if (result.success && result.rooms && result.rooms.length > 0) {
+          const room = result.rooms[0];
+          currentInviteCode = invite;
+          
+          if (room.requires_password) {
+            showPasswordPrompt(room.id, invite);
+          } else {
+            joinRoomWithInvite(room.id, invite);
+          }
+        } else {
+          alert('Invalid invite link or room not found');
+        }
+      } catch (err) {
+        alert('Error searching rooms');
+        console.error(err);
+      }
+    }
+
+    async function joinRoomWithInvite(roomId, inviteCode) {
+      try {
+        const res = await fetch('/api/rooms/join', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({room_id: roomId, invite_code: inviteCode})
+        });
+        const result = await res.json();
+        
+        if (result.success) {
+          closeSearchModal();
+          window.location.href = `/chat/${roomId}`;
+        } else {
+          alert(result.msg || 'Failed to join room');
+        }
+      } catch (err) {
+        alert('Error joining room');
+      }
+    }
+
+    function displaySearchResults(rooms) {
+      const container = document.getElementById('searchResults');
+      container.innerHTML = '';
+      
+      if (!rooms || rooms.length === 0) {
+        container.innerHTML = '<p style="color: #999;">No rooms found</p>';
+        return;
+      }
+      
+      container.innerHTML = '<h4 style="margin-bottom: 12px;">Search Results:</h4>';
+      
+      rooms.forEach(room => {
+        const card = document.createElement('div');
+        card.className = 'room-card';
+        card.style.marginBottom = '12px';
+        card.onclick = () => {
+          closeSearchModal();
+          joinRoomDirect(room.id);
+        };
+        card.innerHTML = `
+          <div class="room-name">${escapeHtml(room.name)}</div>
+          <div class="room-desc">${escapeHtml(room.description || 'No description')}</div>
+          <div class="room-meta">
+            <div>
+              <span class="room-badge badge-${room.type}">${room.type}</span>
+            </div>
+            <div>👥 ${room.member_count || 0}/${room.max_members || 50}</div>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    function showPasswordPrompt(roomId, inviteCode) {
+      currentPasswordRoomId = roomId;
+      currentInviteCode = inviteCode;
+      document.getElementById('passwordPromptInput').value = '';
+      document.getElementById('passwordPromptModal').classList.add('active');
+    }
+
+    function closePasswordPrompt() {
+      currentPasswordRoomId = null;
+      currentInviteCode = null;
+      document.getElementById('passwordPromptModal').classList.remove('active');
+    }
+
+    async function submitPassword() {
+      if (!currentPasswordRoomId) return;
+      
+      const password = document.getElementById('passwordPromptInput').value.trim();
+      if (!password) {
+        alert('Please enter a password');
+        return;
+      }
+
+      try {
+        const body = {room_id: currentPasswordRoomId, password: password};
+        
+        if (currentInviteCode) {
+          body.invite_code = currentInviteCode;
+        }
+        
+        const res = await fetch('/api/rooms/join', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body)
+        });
+        const result = await res.json();
+        
+        if (result.success) {
+          closePasswordPrompt();
+          closeSearchModal();
+          window.location.href = `/chat/${currentPasswordRoomId}`;
+        } else {
+          alert(result.msg || 'Incorrect password');
+        }
+      } catch (err) {
+        alert('Error joining room');
+      }
+    }
+
+    async function resolveReport(reportId) {
+      if (!confirm('Mark this report as resolved?')) return;
+      
+      try {
+        const res = await fetch(`/api/reports/${reportId}/resolve`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({status: 'resolved'})
+        });
+        const result = await res.json();
+        
+        if (result.success) {
+          const item = document.querySelector(`[data-report-id="${reportId}"]`);
+          if (item) item.remove();
+          
+          const reportsList = document.getElementById('reportsList');
+          if (reportsList && reportsList.querySelectorAll('.report-item').length === 0) {
+            reportsList.innerHTML = '<div class="empty-state"><p>✅ No pending reports. All good!</p></div>';
+          }
+          
+          const count = document.getElementById('reportCount');
+          if (count) {
+            const newCount = parseInt(count.textContent) - 1;
+            count.textContent = newCount;
+            if (newCount === 0) count.style.display = 'none';
+          }
+        } else {
+          alert(result.msg || 'Failed to resolve report');
+        }
+      } catch (err) {
+        alert('Error resolving report');
+        console.error(err);
+      }
+    }
+
+    async function deleteReportedRoom(roomId, reportId) {
+      if (!confirm('Delete this room permanently? This cannot be undone!')) return;
+      
+      try {
+        const res = await fetch(`/api/rooms/${roomId}/delete`, {
+          method: 'POST'
+        });
+        const result = await res.json();
+        
+        if (result.success) {
+          // Auto-resolve the report
+          await resolveReport(reportId);
+        } else {
+          alert(result.msg || 'Failed to delete room');
+        }
+      } catch (err) {
+        alert('Error deleting room');
+        console.error(err);
+      }
+    }
+
+    window.onclick = function(event) {
+      if (event.target.classList.contains('modal')) {
+        event.target.classList.remove('active');
+      }
+    }
+    
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        document.querySelectorAll('.modal').forEach(m => m.classList.remove('active'));
+      }
+    });
+  </script>
+</body>
+</html>
