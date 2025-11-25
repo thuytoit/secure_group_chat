@@ -585,11 +585,11 @@
       oldestMessageId: null,
       pendingFileMetadata: null,
       isUploading: false,
-      retryCount: 0
+      retryCount: 0,
+      keyRotationInProgress: false
     };
     let messages = {};
     let messageElements = {};
-    let pendingMessages = [];  // Queue for messages during key rotation
 
     function powMod(base, exp, mod) {
       let result = 1n;
@@ -768,42 +768,6 @@
       }
     }
 
-    function processPendingMessages() {
-      if (pendingMessages.length === 0) return;
-      
-      console.log(`[PENDING] Processing ${pendingMessages.length} queued messages`);
-      const successfullyProcessed = [];
-      
-      pendingMessages.forEach((msgData, index) => {
-        try {
-          // Check if we have the right key version
-          if (msgData.key_version !== state.keyVersion) {
-            console.log(`[PENDING] Skipping msg ${msgData.id} - key version mismatch (have: ${state.keyVersion}, need: ${msgData.key_version})`);
-            return; // Keep in queue for now
-          }
-          
-          const text = safeDecrypt(msgData.enc, state.groupKey);
-          addMessage({
-            id: msgData.id,
-            sender: msgData.sender,
-            text: text,
-            timestamp: msgData.timestamp,
-            reactions: msgData.reactions || {},
-            file_metadata: msgData.file_metadata
-          });
-          successfullyProcessed.push(index);
-        } catch (e) {
-          console.error(`[PENDING] Failed to decrypt queued message ${msgData.id}:`, e);
-        }
-      });
-      
-      // Remove successfully processed messages from queue
-      if (successfullyProcessed.length > 0) {
-        pendingMessages = pendingMessages.filter((_, index) => !successfullyProcessed.includes(index));
-        console.log(`[PENDING] Removed ${successfullyProcessed.length} messages from queue, ${pendingMessages.length} remaining`);
-      }
-    }
-
     socket = io({ auth: { token: TOKEN, room_id: ROOM_ID } });
 
     socket.on('connect', () => {
@@ -843,6 +807,9 @@
       }
     });
 
+    let pendingMessages = [];  // Queue for messages during key rotation
+    let isProcessingKey = false;  // Track if we're processing a key
+
     socket.on('group_key', (data) => {
       if (!state.userKey) {
         console.warn('User key not ready, retrying...');
@@ -856,6 +823,13 @@
         }
         return;
       }
+      
+      if (isProcessingKey) {
+        console.warn('Already processing a key, ignoring duplicate');
+        return;
+      }
+      
+      isProcessingKey = true;
       
       try {
         const encBytes = CryptoJS.enc.Hex.parse(data.enc);
@@ -876,7 +850,7 @@
         const version = data.version || 0;
         const oldVersion = state.keyVersion;
         
-        // Update the key and version
+        // Update the key IMMEDIATELY
         state.groupKey = decrypted;
         state.keyVersion = version;
         
@@ -884,20 +858,41 @@
           // Key rotation - update immediately and process pending
           console.log(`[KEY_ROTATION] Received v${version} (from v${oldVersion}), updating immediately`);
           
-          // Mark ready immediately for rotation
+          // Mark ready immediately for rotation - key is already decrypted
           state.keyReady = true;
+          state.keyRotationInProgress = false;
+          isProcessingKey = false;
           updateStatus(`Ready - Encrypted Chat (v${version})`, true);
           
           // Process pending messages NOW with new key
-          processPendingMessages();
+          if (pendingMessages.length > 0) {
+            console.log(`[KEY_ROTATION] Processing ${pendingMessages.length} pending messages`);
+            pendingMessages.forEach(msgData => {
+              try {
+                const text = safeDecrypt(msgData.enc, state.groupKey);
+                addMessage({
+                  id: msgData.id,
+                  sender: msgData.sender,
+                  text: text,
+                  timestamp: msgData.timestamp,
+                  reactions: msgData.reactions || {},
+                  file_metadata: msgData.file_metadata
+                });
+              } catch (e) {
+                console.error('Failed to decrypt pending message:', e);
+              }
+            });
+            pendingMessages = [];
+          }
           
           addMessage({ text: `🔑 Security key rotated to v${version}`, type: 'sys', timestamp: Date.now() / 1000 });
         } else {
-          // Initial key
+          // Initial key - use requestAnimationFrame for UI setup
           console.log(`[KEY] Received initial v${version}, processing...`);
           
           requestAnimationFrame(() => {
             state.keyReady = true;
+            isProcessingKey = false;
             updateStatus(`Ready - Encrypted Chat (v${version})`, true);
             console.log(`[KEY] Ready with v${version}, requesting notifications and history`);
             
@@ -908,6 +903,7 @@
         
         console.log(`[KEY] Updated to v${version}, status: ${data.status}`);
       } catch (e) {
+        isProcessingKey = false;
         console.error('Key decrypt error:', e);
         addMessage({ text: 'Key decryption failed. Please refresh.', type: 'error' });
       }
@@ -993,10 +989,10 @@
       else if (data.type === 'disconnected') text = `← ${data.user} disconnected`;
       else if (data.type === 'kicked') {
         text = `⊗ ${data.msg}`;
-        // When kick notification arrives, temporarily disable sending
+        // Mark key rotation in progress when kick notification arrives
+        state.keyRotationInProgress = true;
         state.keyReady = false;
-        updateStatus('Key rotation in progress...', false);
-        console.log('[SYS] Kick detected, waiting for new key...');
+        console.log('[SYS] Kick detected, marking key rotation in progress');
       }
       else if (data.type === 'admin_transfer') text = `👑 ${data.msg}`;
       else if (data.type === 'left') text = data.msg;
@@ -1011,17 +1007,29 @@
     });
 
     socket.on('encrypted_msg', (data) => {
-      // If key is not ready, queue the message
-      if (!state.keyReady || !state.groupKey) {
-        console.log(`[QUEUE] Key not ready, queuing message from ${data.sender}`);
+      // If key rotation is in progress, queue the message
+      if (state.keyRotationInProgress) {
+        console.log(`[MSG_QUEUE] Queuing message from ${data.sender} during key rotation`);
         pendingMessages.push(data);
         return;
       }
       
-      // If key version doesn't match, queue the message
-      if (data.key_version !== state.keyVersion) {
-        console.log(`[QUEUE] Key version mismatch (have: ${state.keyVersion}, need: ${data.key_version}), queuing message`);
-        pendingMessages.push(data);
+      if (!state.keyReady || !state.groupKey) {
+        console.warn('Received message but key not ready');
+        
+        // Queue message to retry after key is ready
+        setTimeout(() => {
+          if (state.keyReady && state.groupKey) {
+            console.log('Key now ready, retrying message decrypt');
+            socket.emit('request_retry_message', { message_id: data.id });
+          } else {
+            addMessage({
+              text: `[Message from ${data.sender} - waiting for encryption key...]`,
+              type: 'error',
+              timestamp: data.timestamp
+            });
+          }
+        }, 1000);
         return;
       }
       
@@ -1039,9 +1047,17 @@
         console.error('Message decrypt error', e);
         console.log('Message key_version:', data.key_version, 'Current key version:', state.keyVersion);
         
-        // If decryption fails, queue for retry
-        console.warn('Decryption failed, queueing for retry...');
-        pendingMessages.push(data);
+        // If key version mismatch, might be during rotation - queue for retry
+        if (data.key_version !== state.keyVersion) {
+          console.warn('Key version mismatch, queueing for retry after rotation...');
+          pendingMessages.push(data);
+        } else {
+          addMessage({
+            text: `[Message from ${data.sender} - decryption failed]`,
+            type: 'error',
+            timestamp: data.timestamp
+          });
+        }
       }
     });
 
@@ -1136,6 +1152,15 @@
       const msg = input.value.trim();
       
       if (!msg && !state.pendingFileMetadata) return;
+      
+      if (state.keyRotationInProgress) {
+        addMessage({
+          text: '⚠️ Key rotation in progress. Please wait a moment...',
+          type: 'error',
+          timestamp: Date.now() / 1000
+        });
+        return;
+      }
       
       if (!state.keyReady || !state.groupKey) {
         addMessage({

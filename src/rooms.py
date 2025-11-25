@@ -76,11 +76,13 @@ class RoomManager:
         return True, room_id, f"Room '{name}' created"
     
     def join_room(self, room_id: str, username: str, password: Optional[str] = None,
-                 invite_code: Optional[str] = None) -> Tuple[bool, Optional[bytes], str]:
+                 invite_code: Optional[str] = None) -> Tuple[bool, Optional[str], str]:
         """
         Join a room with SIMPLIFIED access control:
         - Public: anyone can join
         - Private: need invite code, may need password
+        
+        FIXED: Returns room_id instead of encryption key
         """
         room = db.get_room(room_id)
         if not room:
@@ -128,7 +130,8 @@ class RoomManager:
                 'version': room.get('key_version', 0)
             }
         
-        return True, room_keys[room_id]['key'], f"Joined '{room['name']}'"
+        # FIXED: Return room_id, not the key!
+        return True, room_id, f"Joined '{room['name']}'"
     
     def leave_room(self, room_id: str, username: str) -> Tuple[bool, Optional[str], str]:
         """
