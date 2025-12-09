@@ -7,6 +7,8 @@ import base64
 import time
 import threading
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from flask import send_from_directory
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -46,9 +48,12 @@ room_sids = {}
 backend = default_backend()
 file_storage = {}
 
-# Key management locks to prevent race conditions
+# Key management locks
 key_locks = {}
 connection_locks = threading.Lock()
+
+# Thread pool for crypto operations
+key_executor = ThreadPoolExecutor(max_workers=10)
 
 def get_username_from_token(token: str) -> str | None:
     users = load_users()
@@ -69,21 +74,14 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def broadcast_room_update():
-    """Broadcast room list update to all users in hub AND individual user rooms"""
+    """Broadcast room list update to all users"""
     public_rooms = room_manager.list_public_rooms()
+    socketio.emit('room_list_update', {'public_rooms': public_rooms}, namespace='/')
     
-    # Update for everyone
-    socketio.emit('room_list_update', {
-        'public_rooms': public_rooms
-    }, namespace='/')
-    
-    # Also update individual user rooms for each connected user
     for sid, conn in list(connections.items()):
         if conn.get('username'):
             user_rooms = room_manager.list_user_rooms(conn['username'])
-            socketio.emit('user_rooms_update', {
-                'user_rooms': user_rooms
-            }, room=sid)
+            socketio.emit('user_rooms_update', {'user_rooms': user_rooms}, room=sid)
 
 def broadcast_member_update(room_id: str):
     """Broadcast updated member list to room"""
@@ -94,58 +92,162 @@ def broadcast_member_update(room_id: str):
             'role': m['role'],
             'joined_at': m['joined_at']
         } for m in members]
-    }, room=room_id)
+    }, to=room_id)
 
 def broadcast_reports_update():
     """Broadcast updated reports to all connected clients"""
     try:
         pending_reports = room_manager.get_pending_reports()
-        socketio.emit('reports_updated', {
-            'pending_reports': pending_reports
-        })
+        socketio.emit('reports_updated', {'pending_reports': pending_reports})
     except Exception as e:
         logger.error(f"Report broadcast error: {e}")
 
 def get_room_lock(room_id: str):
-    """Get or create a lock for a specific room to prevent race conditions"""
+    """Get or create a lock for a specific room"""
     with connection_locks:
         if room_id not in key_locks:
             key_locks[room_id] = threading.Lock()
         return key_locks[room_id]
 
-def safe_send_group_key(sid: str, room_id: str, username: str):
-    """Safely send group key to a user with error handling and retries"""
+def send_group_key_to_user(sid: str, room_id: str, username: str, status: str = 'initial'):
+    """
+    Send group key to a single user with proper error handling and DEBUG logging.
+    """
+    if sid not in connections:
+        logger.error(f"[KEY] Socket {sid} not found in connections")
+        return False
+    
+    conn = connections[sid]
+    
+    if not conn.get('user_key'):
+        logger.error(f"[KEY] No user key for {username}")
+        return False
+    
     try:
-        if sid not in connections:
-            return False
+        # Get current room key with lock
+        room_lock = get_room_lock(room_id)
+        with room_lock:
+            room_key, version = room_manager.get_room_key(room_id)
+            if not room_key:
+                logger.error(f"[KEY] No room key for {room_id}")
+                return False
             
-        conn = connections[sid]
-        if conn.get('user_key') is None:
-            logger.warning(f"[KEY] No user key for {username}, skipping group key send")
-            return False
+            # DEBUG: Log key info
+            import hashlib
+            key_hash = hashlib.sha256(room_key).hexdigest()[:16]
+            logger.info(f"[KEY] Room {room_id} key hash: {key_hash}, version: {version}")
+            
+            # Encrypt the room key
+            enc_data = encrypt_message(room_key, conn['user_key'])
+            
+            # DEBUG: Log encryption info
+            logger.info(f"[KEY] Encrypted room key for {username}: {len(enc_data)} bytes")
         
-        room_key, version = room_manager.get_room_key(room_id)
-        if not room_key:
-            logger.error(f"[KEY] No room key for {room_id}")
-            return False
-        
-        enc_data = encrypt_message(room_key, conn['user_key'])
-        
-        # Mark as NOT ready before sending key
-        conn['key_ready'] = False
-        
+        # Send the encrypted key using 'to' parameter
         socketio.emit('group_key', {
-            'enc': enc_data.hex(), 
-            'version': version, 
-            'status': 'initial'
-        }, room=sid)
+            'enc': enc_data.hex(),
+            'version': version,
+            'status': status
+        }, to=sid)
         
-        logger.info(f"[KEY] Sent v{version} to {username} in {room_id}")
+        logger.info(f"[KEY] ✓ Sent v{version} ({status}) to {username} in {room_id}")
+        
         return True
         
     except Exception as e:
-        logger.error(f"[KEY] Failed to send group key to {username}: {e}")
+        logger.error(f"[KEY] Failed to send key to {username}: {e}")
+        import traceback
+        traceback.print_exc()
         return False
+        
+def distribute_new_key_after_kick(room_id: str, new_key: bytes, new_version: int):
+    """
+    Distribute new key to all remaining room members after a kick.
+    """
+    room_lock = get_room_lock(room_id)
+    
+    with room_lock:
+        logger.info(f"[KEY_ROTATION] Starting distribution of v{new_version} for {room_id}")
+        
+        # Get all SIDs currently in this room
+        current_sids = room_sids.get(room_id, []).copy()
+        
+        logger.info(f"[KEY_ROTATION] Found {len(current_sids)} connections in room")
+        
+        if not current_sids:
+            logger.warning(f"[KEY_ROTATION] No connections to re-key in {room_id}")
+            return
+        
+        # Send new keys to all members
+        successful = 0
+        for sid in current_sids:
+            if sid not in connections:
+                continue
+                
+            conn = connections[sid]
+            if not conn.get('user_key'):
+                continue
+            
+            try:
+                enc_data = encrypt_message(new_key, conn['user_key'])
+                # Use 'to' parameter for direct socket targeting
+                socketio.emit('group_key', {
+                    'enc': enc_data.hex(),
+                    'version': new_version,
+                    'status': 'rotated'
+                }, to=sid)
+                successful += 1
+                logger.info(f"[KEY_ROTATION] Sent v{new_version} to {conn['username']}")
+                
+                # Update connection state
+                connections[sid]['key_version'] = new_version
+                    
+            except Exception as e:
+                logger.error(f"[KEY_ROTATION] Failed to send to {conn.get('username')}: {e}")
+        
+        logger.info(f"[KEY_ROTATION] Completed: {successful}/{len(current_sids)} successful")
+
+def check_connection_health():
+    """Periodically check connection health and clean up stale connections"""
+    while True:
+        try:
+            current_time = time.time()
+            stale_sids = []
+            
+            for sid, conn in list(connections.items()):
+                # If connection has been in non-ready state for too long, clean it up
+                if not conn.get('ready') and current_time - conn.get('connect_time', current_time) > 30:
+                    stale_sids.append(sid)
+                    logger.warning(f"[HEALTH] Removing stale connection {sid} for {conn.get('username')}")
+            
+            for sid in stale_sids:
+                if sid in connections:
+                    username = connections[sid].get('username')
+                    room_id = connections[sid].get('room_id')
+                    
+                    # Clean up connection
+                    if room_id:
+                        leave_room(room_id, sid)
+                        if room_id in room_sids and sid in room_sids[room_id]:
+                            room_sids[room_id].remove(sid)
+                    
+                    if username in active_sids:
+                        active_sids[username] = [s for s in active_sids[username] if s != sid]
+                        if not active_sids[username]:
+                            del active_sids[username]
+                    
+                    del connections[sid]
+                    
+                    logger.info(f"[HEALTH] Cleaned up stale connection for {username}")
+        
+        except Exception as e:
+            logger.error(f"[HEALTH] Error in health check: {e}")
+        
+        time.sleep(30)
+
+# Start health monitoring in background
+health_thread = threading.Thread(target=check_connection_health, daemon=True)
+health_thread.start()
 
 # ===== HTTP ROUTES =====
 
@@ -277,7 +379,15 @@ def join_room_api():
     password = data.get('password')
     invite_code = data.get('invite_code')
     
-    success, key, msg = room_manager.join_room(
+    # If room_id is not provided but invite_code is, find room by invite
+    if not room_id and invite_code:
+        room = room_manager.find_room_by_invite(invite_code)
+        if room:
+            room_id = room['id']
+        else:
+            return jsonify({'success': False, 'msg': 'Invalid invite code'})
+    
+    success, room_id, msg = room_manager.join_room(
         room_id=room_id,
         username=session['username'],
         password=password,
@@ -286,8 +396,9 @@ def join_room_api():
     
     if success:
         broadcast_room_update()
-    
-    return jsonify({'success': success, 'msg': msg})
+        return jsonify({'success': True, 'room_id': room_id, 'msg': msg})
+    else:
+        return jsonify({'success': False, 'msg': msg})
 
 @app.route('/api/rooms/<room_id>/edit', methods=['POST'])
 def edit_room_api(room_id):
@@ -314,13 +425,25 @@ def edit_room_api(room_id):
         success, msg = room_manager.edit_room(room_id, name, description, max_members, password)
         
         if success:
+            # Broadcast to hub
             broadcast_room_update()
+            
+            # Broadcast to room with full refresh
             socketio.emit('room_updated', {
                 'room_id': room_id,
                 'name': name,
                 'description': description,
-                'max_members': max_members
+                'max_members': max_members,
+                'refresh': True  # Signal clients to refresh
             }, room=room_id)
+            
+            # Also broadcast to hub connections
+            socketio.emit('room_info_updated', {
+                'room_id': room_id,
+                'name': name,
+                'description': description,
+                'max_members': max_members
+            }, room='hub')
         
         return jsonify({'success': success, 'msg': msg})
     except Exception as e:
@@ -422,6 +545,11 @@ def download_file(file_id):
 def health():
     return jsonify({'status': 'ok', 'users': len(load_users()), 'rooms': len(db.list_public_rooms())})
 
+# Add this route to serve static files
+@app.route('/static/<path:filename>')
+def serve_static(filename):
+    return send_from_directory('static', filename)
+
 # ===== SOCKET.IO HANDLERS =====
 
 @socketio.on('connect')
@@ -454,7 +582,10 @@ def handle_connect(auth):
     if username in active_sids:
         for old_sid in active_sids[username][:]:
             if old_sid in connections and connections[old_sid].get('room_id') == room_id:
-                emit('force_disconnect', room=old_sid)
+                try:
+                    emit('force_disconnect', room=old_sid)
+                except:
+                    pass
                 if old_sid in connections:
                     del connections[old_sid]
                 if room_id in room_sids and old_sid in room_sids[room_id]:
@@ -474,32 +605,35 @@ def handle_connect(auth):
         'room_id': room_id,
         'user_key': None,
         'priv_key': None,
-        'key_ready': False,
-        'key_version': -1
+        'ready': False,
+        'key_version': -1,
+        'connect_time': time.time()
     }
     
     join_room(room_id)
     logger.info(f"[CONNECT] {username} joined room {room_id} ({sid})")
     
     # Start DH key exchange
-    try:
-        param_nums = parameters.parameter_numbers()
-        p, g = param_nums.p, param_nums.g
-        priv_exp = int.from_bytes(os.urandom((p.bit_length() + 7) // 8), 'big') % (p - 2) + 2
-        pub_exp = pow(g, priv_exp, p)
-        priv_numbers = dh.DHPrivateNumbers(priv_exp, dh.DHPublicNumbers(pub_exp, param_nums))
-        priv_key = priv_numbers.private_key(backend)
-        pub_key = priv_key.public_key()
-        pub_num = pub_key.public_numbers()
-        
-        connections[sid]['priv_key'] = priv_key
-        pub_bytes = pub_num.y.to_bytes((pub_num.y.bit_length() + 7) // 8, 'big')
-        emit('dh_pub', {'pub': pub_bytes.hex()})
-        logger.info(f"[DH] Public key sent to {sid}")
-    except Exception as e:
-        logger.error(f"[DH] Key generation failed for {sid}: {e}")
-        emit('error', {'msg': 'Key exchange failed'})
-        return False
+    def start_dh():
+        try:
+            param_nums = parameters.parameter_numbers()
+            p, g = param_nums.p, param_nums.g
+            priv_exp = int.from_bytes(os.urandom((p.bit_length() + 7) // 8), 'big') % (p - 2) + 2
+            pub_exp = pow(g, priv_exp, p)
+            priv_numbers = dh.DHPrivateNumbers(priv_exp, dh.DHPublicNumbers(pub_exp, param_nums))
+            priv_key = priv_numbers.private_key(backend)
+            pub_key = priv_key.public_key()
+            pub_num = pub_key.public_numbers()
+            
+            connections[sid]['priv_key'] = priv_key
+            pub_bytes = pub_num.y.to_bytes((pub_num.y.bit_length() + 7) // 8, 'big')
+            socketio.emit('dh_pub', {'pub': pub_bytes.hex()}, room=sid)
+            logger.info(f"[DH] Sent public key to {sid}")
+        except Exception as e:
+            logger.error(f"[DH] Key generation failed for {sid}: {e}")
+            socketio.emit('error', {'msg': 'Key exchange failed'}, room=sid)
+    
+    threading.Thread(target=start_dh, daemon=True).start()
 
 @socketio.on('dh_peer')
 def handle_dh_peer(data):
@@ -511,46 +645,48 @@ def handle_dh_peer(data):
     try:
         priv_key = connections[sid]['priv_key']
         if not priv_key:
-            raise ValueError('Key exchange failed')
+            raise ValueError('No private key')
         
         pub_hex = data.get('pub', '')
+        if not pub_hex:
+            raise ValueError('No public key received')
+        
         peer_pub_bytes = bytes.fromhex(pub_hex)
         param_nums = parameters.parameter_numbers()
         p = param_nums.p
         peer_pub_int = int.from_bytes(peer_pub_bytes, 'big')
         
         if not (1 < peer_pub_int < p):
-            raise ValueError('Invalid public key')
+            raise ValueError('Invalid public key range')
         
         peer_pub_num = dh.DHPublicNumbers(peer_pub_int, param_nums)
         peer_pub_key = peer_pub_num.public_key(backend)
         
         shared = priv_key.exchange(peer_pub_key)
-        shared_padded = shared.rjust(256, b'\x00')
+        shared_padded = shared.ljust(32, b'\x00')[:32]
         
         user_key = derive_key(shared_padded)
         connections[sid]['user_key'] = user_key
+        connections[sid]['priv_key'] = None
+        
         logger.info(f"[DH] Exchange complete for {sid}")
+        
+        # Send group key immediately
+        room_id = connections[sid]['room_id']
+        username = connections[sid]['username']
+        
+        if send_group_key_to_user(sid, room_id, username, 'initial'):
+            logger.info(f"[DH] Group key sent to {username}")
+        else:
+            emit('error', {'msg': 'Failed to initialize encryption'})
+            
     except Exception as e:
         logger.error(f"[DH] Failed for {sid}: {e}")
         emit('error', {'msg': 'Key exchange failed'})
-        return
-    
-    room_id = connections[sid]['room_id']
-    
-    # Send group key with room lock to prevent race conditions
-    room_lock = get_room_lock(room_id)
-    with room_lock:
-        success = safe_send_group_key(sid, room_id, connections[sid]['username'])
-    
-    if success:
-        connections[sid]['priv_key'] = None  # Clear private key after use
-    else:
-        emit('error', {'msg': 'Failed to initialize encryption'})
 
 @socketio.on('client_ready')
 def handle_client_ready():
-    """Called when client has processed the group key and is ready for notifications/history"""
+    """Client confirms they've processed the key and are ready"""
     sid = request.sid
     if sid not in connections:
         return
@@ -558,35 +694,53 @@ def handle_client_ready():
     username = connections[sid]['username']
     room_id = connections[sid]['room_id']
     
-    # Mark as ready on server
-    connections[sid]['key_ready'] = True
-    logger.info(f"[READY] {username} is ready in room {room_id}")
+    connections[sid]['ready'] = True
+    logger.info(f"[READY] {username} is ready in {room_id}")
     
-    # Send join notification to others
-    emit('sys_msg', {'type': 'joined', 'user': username}, room=room_id, include_self=False)
+    # Send join notification to others FIRST
+    emit('sys_msg', {'type': 'joined', 'user': username}, to=room_id, include_self=False, broadcast=True)
     
-    # Broadcast updated member list
+    # Update member list
     broadcast_member_update(room_id)
     
-    # Send message history to this user
-    members = db.get_room_members(room_id)
-    user_member = next((m for m in members if m['username'] == username), None)
-    if user_member:
-        first_join = user_member['first_join_at']
-        messages = db.get_messages(room_id, first_join, limit=100)
+    # Send message history
+    try:
+        members = db.get_room_members(room_id)
+        user_member = next((m for m in members if m['username'] == username), None)
         
-        emit('message_history', {
-            'messages': [{
-                'id': msg['id'],
-                'sender': msg['sender'],
-                'enc': msg['encrypted_content'],
-                'timestamp': msg['timestamp'],
-                'key_version': msg['key_version'],
-                'reactions': msg['reactions'],
-                'file_metadata': msg['file_metadata']
-            } for msg in messages]
-        })
-        logger.info(f"[HISTORY] Sent {len(messages)} messages to {username}")
+        if user_member:
+            # CRITICAL FIX: Use joined_at (not first_join_at)
+            current_join = user_member['joined_at']
+            
+            # Get the current key version
+            _, key_version = room_manager.get_room_key(room_id)
+            
+            # Get messages after current join time
+            messages = db.get_messages_after_timestamp(room_id, current_join, limit=100)
+            
+            # Filter to only include messages with matching key version
+            compatible_messages = [
+                msg for msg in messages 
+                if msg['key_version'] == key_version
+            ]
+            
+            emit('message_history', {
+                'messages': [{
+                    'id': msg['id'],
+                    'sender': msg['sender'],
+                    'enc': msg['encrypted_content'],
+                    'timestamp': msg['timestamp'],
+                    'key_version': msg['key_version'],
+                    'reactions': msg['reactions'],
+                    'file_metadata': msg['file_metadata']
+                } for msg in compatible_messages],
+                'current_key_version': key_version
+            })
+            logger.info(f"[HISTORY] Sent {len(compatible_messages)} messages to {username} (key v{key_version})")
+    except Exception as e:
+        logger.error(f"[HISTORY] Failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 @socketio.on('message')
 def handle_message(data):
@@ -596,35 +750,58 @@ def handle_message(data):
         return
     
     conn = connections[sid]
-    if not conn.get('key_ready') or conn['user_key'] is None:
-        emit('error', {'msg': 'Encryption not ready'})
-        return
-    
-    if not is_valid_user(conn['token']):
-        emit('error', {'msg': 'Session expired'})
-        return
-    
     username = conn['username']
     room_id = conn['room_id']
+    
+    # Check ready state AND user_key
+    if not conn.get('ready') or not conn.get('user_key'):
+        emit('error', {'msg': 'Not ready to send messages. Please wait...'})
+        logger.warning(f"[MSG] {username} tried to send but not ready")
+        return
+    
     enc_msg = data.get('enc', '')
     file_metadata = data.get('file_metadata')
     
-    # Get current room key version
-    _, key_version = room_manager.get_room_key(room_id)
+    if not enc_msg and not file_metadata:
+        emit('error', {'msg': 'Empty message'})
+        return
     
-    msg_id = db.save_message(room_id, username, enc_msg, key_version, file_metadata)
-    
-    emit('encrypted_msg', {
-        'id': msg_id,
-        'sender': username,
-        'enc': enc_msg,
-        'timestamp': datetime.datetime.now().timestamp(),
-        'key_version': key_version,
-        'file_metadata': file_metadata,
-        'reactions': {}
-    }, room=room_id, include_self=True)
-    
-    logger.info(f"[MSG] {username} in {room_id}, broadcast to room")
+    try:
+        # Get current room key with lock
+        room_lock = get_room_lock(room_id)
+        with room_lock:
+            room_key, key_version = room_manager.get_room_key(room_id)
+            if not room_key:
+                emit('error', {'msg': 'Room key not available'})
+                return
+            
+            # Save message to database FIRST
+            msg_id = db.save_message(room_id, username, enc_msg, key_version, file_metadata)
+            
+            # Create message payload
+            msg_payload = {
+                'id': msg_id,
+                'sender': username,
+                'enc': enc_msg,
+                'timestamp': datetime.datetime.now().timestamp(),
+                'key_version': key_version,
+                'file_metadata': file_metadata,
+                'reactions': {}
+            }
+            
+            logger.info(f"[MSG] {username} sent message in {room_id} (id: {msg_id}), broadcasting to room")
+            
+            # THE FIX: Use emit with 'to' parameter for room broadcasting
+            # This broadcasts to ALL clients in the Socket.IO room
+            emit('encrypted_msg', msg_payload, to=room_id, include_self=True, broadcast=True)
+            
+            logger.info(f"[MSG] ✓ Broadcasted message {msg_id} to all members in room {room_id}")
+            
+    except Exception as e:
+        logger.error(f"[MSG] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        emit('error', {'msg': 'Failed to send message'})
 
 @socketio.on('load_more_messages')
 def handle_load_more(data):
@@ -777,68 +954,34 @@ def handle_kick(data):
     logger.info(f"[KICK] {kicked_user} kicked from {room_id}")
     _, new_version = room_manager.get_room_key(room_id)
     
-    # Kick user out
+    # Remove kicked user from room_sids FIRST
+    kicked_sids = []
     if kicked_user in active_sids:
         for s in active_sids[kicked_user][:]:
             if s in connections and connections[s].get('room_id') == room_id:
-                emit('kicked', {'msg': msg}, room=s)
-                leave_room(room_id, s)
-                if room_id in room_sids and s in room_sids[room_id]:
-                    room_sids[room_id].remove(s)
-                if s in connections:
-                    del connections[s]
-        active_sids[kicked_user] = [s for s in active_sids.get(kicked_user, []) if s not in connections or connections[s].get('room_id') != room_id]
+                kicked_sids.append(s)
     
-    # Notify room
-    emit('sys_msg', {'type': 'kicked', 'user': kicked_user, 'msg': msg}, room=room_id, include_self=True)
+    # Remove from room_sids before distributing new key
+    for s in kicked_sids:
+        if room_id in room_sids and s in room_sids[room_id]:
+            room_sids[room_id].remove(s)
     
-    # Improved key rotation with better synchronization
-    def distribute_new_key_safe():
-        time.sleep(0.3)  # Brief wait for notifications to process
-        
-        room_lock = get_room_lock(room_id)
-        with room_lock:
-            logger.info(f"[KEY_ROTATION] Starting safe distribution of v{new_version}")
-            
-            remaining_sids = []
-            for s in list(connections):
-                if s in connections and connections[s].get('room_id') == room_id:
-                    remaining_sids.append(s)
-                    # Mark as NOT ready during rotation
-                    connections[s]['key_ready'] = False
-            
-            logger.info(f"[KEY_ROTATION] Found {len(remaining_sids)} members to re-key")
-            
-            # Send new key to each member with error handling
-            successful_sids = []
-            for s in remaining_sids:
-                if s not in connections or connections[s].get('user_key') is None:
-                    logger.warning(f"[KEY_ROTATION] Skipping {s} - no user key")
-                    continue
-                
-                try:
-                    enc_data = encrypt_message(new_key, connections[s]['user_key'])
-                    socketio.emit('group_key', {
-                        'enc': enc_data.hex(), 
-                        'version': new_version, 
-                        'status': 'rotated'
-                    }, room=s)
-                    successful_sids.append(s)
-                    logger.info(f"[KEY_ROTATION] Sent v{new_version} to {s}")
-                except Exception as e:
-                    logger.error(f"[KEY_ROTATION] Failed to send to {s}: {e}")
-            
-            # Mark successful ones as ready after a brief delay
-            time.sleep(0.2)
-            for s in successful_sids:
-                if s in connections:
-                    connections[s]['key_ready'] = True
-                    connections[s]['key_version'] = new_version
-                    logger.info(f"[KEY_ROTATION] Marked {s} as ready with v{new_version}")
-        
-        logger.info(f"[KEY_ROTATION] Completed for room {room_id}")
+    # Kick user(s) immediately
+    for s in kicked_sids:
+        try:
+            socketio.emit('kicked', {'msg': msg}, to=s)
+            leave_room(room_id, s)
+        except:
+            pass
+        if s in connections:
+            del connections[s]
     
-    threading.Thread(target=distribute_new_key_safe, daemon=True).start()
+    # Notify room AFTER removing kicked user - use 'to' parameter
+    emit('sys_msg', {'type': 'kicked', 'user': kicked_user, 'msg': msg}, to=room_id, include_self=True, broadcast=True)
+    
+    # Distribute new key to remaining members
+    threading.Thread(target=distribute_new_key_after_kick, 
+                    args=(room_id, new_key, new_version), daemon=True).start()
     
     broadcast_room_update()
     broadcast_member_update(room_id)

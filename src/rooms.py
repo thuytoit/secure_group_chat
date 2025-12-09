@@ -67,22 +67,21 @@ class RoomManager:
         if not success:
             return False, None, "Room name already exists"
         
-        # Generate initial encryption key
+        # Generate initial encryption key ONCE and store it
+        initial_key = os.urandom(32)
         room_keys[room_id] = {
-            'key': os.urandom(32),
+            'key': initial_key,
             'version': 0
         }
+        
+        print(f"[KEY_INIT] Created room {room_id} with key v0")
         
         return True, room_id, f"Room '{name}' created"
     
     def join_room(self, room_id: str, username: str, password: Optional[str] = None,
                  invite_code: Optional[str] = None) -> Tuple[bool, Optional[str], str]:
         """
-        Join a room with SIMPLIFIED access control:
-        - Public: anyone can join
-        - Private: need invite code, may need password
-        
-        FIXED: Returns room_id instead of encryption key
+        Join a room with SIMPLIFIED access control
         """
         room = db.get_room(room_id)
         if not room:
@@ -114,7 +113,7 @@ class RoomManager:
                 if not bcrypt.checkpw(password.encode(), room['password_hash'].encode()):
                     return False, None, "Incorrect password"
         
-        # Add or re-add user to room (preserving role if rejoining)
+        # Add or re-add user to room
         if current_role:
             success = db.add_member(room_id, username, current_role)
         else:
@@ -125,19 +124,17 @@ class RoomManager:
         
         # Ensure room key exists
         if room_id not in room_keys:
+            print(f"[KEY_WARNING] Room {room_id} key not found in memory!")
+            print(f"[KEY_WARNING] Server restart detected. Creating new key.")
             room_keys[room_id] = {
                 'key': os.urandom(32),
                 'version': room.get('key_version', 0)
             }
         
-        # FIXED: Return room_id, not the key!
         return True, room_id, f"Joined '{room['name']}'"
     
     def leave_room(self, room_id: str, username: str) -> Tuple[bool, Optional[str], str]:
-        """
-        Leave a room
-        Returns: (success, new_admin, message)
-        """
+        """Leave a room"""
         role = db.get_member_role(room_id, username)
         if not role:
             return False, None, "Not in room"
@@ -157,16 +154,13 @@ class RoomManager:
                     del room_keys[room_id]
                 return True, None, "Room deleted (last member)"
         
-        # Remove member (keep first_join_at for history)
+        # Remove member
         db.remove_member(room_id, username, wipe_history=False)
         
         return True, new_admin, "Left room"
     
     def kick_user(self, room_id: str, kicker_token: str, target_username: str) -> Tuple[bool, Optional[bytes], str]:
-        """
-        Kick user from room and rotate key
-        Returns: (success, new_key, message)
-        """
+        """Kick user from room and rotate key"""
         kicker = self._get_username_from_token(kicker_token)
         if not kicker:
             return False, None, "Invalid session"
@@ -181,15 +175,17 @@ class RoomManager:
         if kicker == target_username:
             return False, None, "Cannot kick yourself"
         
-        # Remove member completely (wipe history access)
+        # Remove member completely
         success = db.remove_member(room_id, target_username, wipe_history=True)
         if not success:
             return False, None, "User not in room"
         
-        # Rotate room key
+        # Ensure key exists before rotating
         if room_id not in room_keys:
-            room_keys[room_id] = {'key': os.urandom(32), 'version': 0}
+            print(f"[KEY_ERROR] Cannot rotate key for {room_id} - key not found!")
+            return False, None, "Room key error"
         
+        # Rotate room key
         old_key = room_keys[room_id]['key']
         new_version = room_keys[room_id]['version'] + 1
         new_key = crypto.ratchet_key(old_key, version=new_version)
@@ -201,22 +197,33 @@ class RoomManager:
         
         db.update_room_key_version(room_id, new_version)
         
+        print(f"[KEY_ROTATE] Room {room_id} key rotated: v{new_version-1} → v{new_version}")
+        
         return True, new_key, f"Kicked {target_username}, key rotated to v{new_version}"
     
     def get_room_key(self, room_id: str) -> Tuple[Optional[bytes], int]:
-        """Get current room key and version"""
-        if room_id not in room_keys:
-            room = db.get_room(room_id)
-            if room:
-                room_keys[room_id] = {
-                    'key': os.urandom(32),
-                    'version': room.get('key_version', 0)
-                }
+        """Get current room key and version - MUST return same key for all users"""
         
+        # Check if key already exists FIRST
         if room_id in room_keys:
             return room_keys[room_id]['key'], room_keys[room_id]['version']
-        return None, 0
-    
+        
+        # Key doesn't exist - check if room exists in database
+        room = db.get_room(room_id)
+        if not room:
+            print(f"[KEY] Room {room_id} not found in database")
+            return None, 0
+        
+        # Room exists but no key - generate new one
+        print(f"[KEY] Generating new key for existing room {room_id}")
+        new_key = os.urandom(32)
+        room_keys[room_id] = {
+            'key': new_key,
+            'version': room.get('key_version', 0)
+        }
+        
+        return room_keys[room_id]['key'], room_keys[room_id]['version']
+       
     def delete_room(self, room_id: str, token: str) -> Tuple[bool, str]:
         """Delete a room (room admin or global admin)"""
         username = self._get_username_from_token(token)
@@ -236,12 +243,11 @@ class RoomManager:
         return success, "Room deleted" if success else "Failed to delete"
     
     def edit_room(self, room_id: str, name: str, description: str, max_members: int, password: Optional[str] = None) -> Tuple[bool, str]:
-        """Edit room details - password can be added, removed, or changed"""
+        """Edit room details"""
         room = db.get_room(room_id)
         if not room:
             return False, "Room not found"
         
-        # Update name, description, max_members
         try:
             success = db.update_room_details(room_id, name, description, max_members)
             if not success:
@@ -253,10 +259,8 @@ class RoomManager:
         if room['type'] == 'private':
             if password is not None:
                 if password == '':
-                    # Remove password (set to NULL)
                     db.update_room_password(room_id, None)
                 else:
-                    # Set or update password
                     password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
                     db.update_room_password(room_id, password_hash)
         
@@ -266,7 +270,6 @@ class RoomManager:
         """Find a private room by invite code"""
         room = db.find_room_by_invite_code(invite_code)
         if room:
-            # Indicate if password is required
             room['requires_password'] = bool(room.get('has_password'))
         return room
     
@@ -283,8 +286,6 @@ class RoomManager:
         members = db.get_room_members(room_id)
         room['members'] = members
         room['member_count'] = len(members)
-        
-        # Don't expose sensitive data
         room.pop('password_hash', None)
         
         return room
@@ -315,6 +316,14 @@ class RoomManager:
         """Resolve a report"""
         success = db.resolve_report(report_id, admin_username, status)
         return success, "Report resolved" if success else "Failed to resolve"
+    
+    def get_member_first_join(self, room_id: str, username: str) -> Optional[float]:
+        """Get the first join timestamp for a member"""
+        members = db.get_room_members(room_id)
+        for member in members:
+            if member['username'] == username:
+                return member['first_join_at']
+        return None
     
     def _get_username_from_token(self, token: str) -> Optional[str]:
         """Helper to get username from token"""

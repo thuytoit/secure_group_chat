@@ -374,8 +374,8 @@ def delete_message(message_id: int, deleted_by: str) -> bool:
     except:
         return False
 
-def get_message_sender(message_id: int) -> Optional[str]:
-    """Get the sender of a message"""
+def get_message_sender(message_id: int) -> Optional[Dict]:
+    """Get the sender and room_id of a message"""
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('SELECT sender, room_id FROM messages WHERE id = ?', (message_id,))
@@ -532,6 +532,45 @@ def search_rooms_by_name(query: str) -> List[Dict]:
     ''', (f'%{query}%',))
     rows = cursor.fetchall()
     return [dict(row) for row in rows]
+
+def get_messages_after_timestamp(room_id: str, timestamp: float, limit: int = 50) -> List[Dict]:
+    """Get messages for a room after a specific timestamp"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    query = '''
+        SELECT m.*, GROUP_CONCAT(r.emoji || ':' || r.username, '|') as reactions
+        FROM messages m
+        LEFT JOIN reactions r ON m.id = r.message_id
+        WHERE m.room_id = ? AND m.timestamp >= ? AND m.deleted = 0
+        GROUP BY m.id
+        ORDER BY m.id DESC
+        LIMIT ?
+    '''
+    
+    cursor.execute(query, (room_id, timestamp, limit))
+    rows = cursor.fetchall()
+    
+    messages = []
+    for row in rows:
+        msg = dict(row)
+        if msg['reactions']:
+            reactions_dict = {}
+            for reaction in msg['reactions'].split('|'):
+                emoji, user = reaction.split(':')
+                if emoji not in reactions_dict:
+                    reactions_dict[emoji] = []
+                reactions_dict[emoji].append(user)
+            msg['reactions'] = reactions_dict
+        else:
+            msg['reactions'] = {}
+        
+        if msg['file_metadata']:
+            msg['file_metadata'] = json.loads(msg['file_metadata'])
+        
+        messages.append(msg)
+    
+    return list(reversed(messages))
 
 # Initialize database on import
 init_db()
