@@ -4,417 +4,19 @@
   <title>{{ room_name }} - Secure Chat</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-      height: 100vh;
-      display: flex;
-      flex-direction: column;
-      background: #f5f7fa;
-    }
-    .chat-header {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      padding: 16px 24px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-      position: relative;
-      z-index: 100;
-    }
-    .chat-header h1 { font-size: 20px; display: flex; align-items: center; gap: 10px; }
-    .chat-header .status { font-size: 12px; opacity: 0.9; }
-    .chat-header .actions { display: flex; gap: 8px; flex-wrap: wrap; }
-    .btn {
-      padding: 8px 16px;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 13px;
-      font-weight: 500;
-      transition: all 0.3s;
-    }
-    .btn-light { background: rgba(255, 255, 255, 0.2); color: white; }
-    .btn-light:hover { background: rgba(255, 255, 255, 0.3); }
-    .btn-danger { background: #ef4444; color: white; }
-    .btn-danger:hover { background: #dc2626; }
-    .btn-primary { background: #667eea; color: white; }
-    .btn-primary:hover { background: #5568d3; }
-    .chat-container {
-      flex: 1;
-      display: flex;
-      overflow: hidden;
-    }
-    .sidebar {
-      width: 250px;
-      background: white;
-      border-right: 1px solid #e5e7eb;
-      display: flex;
-      flex-direction: column;
-    }
-    .sidebar h3 {
-      padding: 16px;
-      background: #f9fafb;
-      border-bottom: 1px solid #e5e7eb;
-      font-size: 14px;
-      color: #666;
-    }
-    .member-list {
-      flex: 1;
-      overflow-y: auto;
-    }
-    .member-item {
-      padding: 12px 16px;
-      border-bottom: 1px solid #f3f4f6;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-    .member-item .avatar {
-      width: 32px;
-      height: 32px;
-      border-radius: 50%;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: white;
-      font-weight: 600;
-      font-size: 14px;
-    }
-    .member-item .name { flex: 1; font-size: 14px; color: #333; }
-    .member-item .badge {
-      font-size: 10px;
-      padding: 2px 6px;
-      border-radius: 3px;
-      background: #fef3c7;
-      color: #d97706;
-    }
-    .chat-main {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      background: white;
-    }
-    #messages {
-      flex: 1;
-      overflow-y: auto;
-      padding: 20px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .load-more {
-      text-align: center;
-      padding: 12px;
-      color: #667eea;
-      cursor: pointer;
-      font-size: 13px;
-      font-weight: 500;
-    }
-    .load-more:hover { background: #f9fafb; }
-    .msg {
-      max-width: 70%;
-      display: flex;
-      flex-direction: column;
-      margin-bottom: 4px;
-    }
-    .msg.own { align-self: flex-end; align-items: flex-end; }
-    .msg .msg-header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 4px;
-      font-size: 12px;
-      color: #666;
-    }
-    .msg .msg-body {
-      background: #f3f4f6;
-      padding: 12px 16px;
-      border-radius: 12px;
-      word-wrap: break-word;
-      position: relative;
-      white-space: pre-wrap;
-    }
-    .msg.own .msg-body {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-    }
-    .msg.sys {
-      align-self: center;
-      max-width: 100%;
-    }
-    .msg.sys .msg-body {
-      background: #fef3c7;
-      color: #92400e;
-      font-style: italic;
-      font-size: 13px;
-    }
-    .msg.error .msg-body {
-      background: #fee2e2;
-      color: #dc2626;
-      font-weight: 500;
-    }
-    .msg-actions {
-      display: flex;
-      gap: 8px;
-      margin-top: 4px;
-      font-size: 11px;
-    }
-    .msg-action {
-      cursor: pointer;
-      padding: 4px 8px;
-      border-radius: 4px;
-      background: #f3f4f6;
-      color: #666;
-      transition: all 0.2s;
-      user-select: none;
-    }
-    .msg-action:hover { background: #e5e7eb; color: #333; }
-    .reactions {
-      display: flex;
-      gap: 4px;
-      flex-wrap: wrap;
-      margin-top: 6px;
-      margin-bottom: 8px;
-    }
-    .reaction {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      padding: 4px 8px;
-      border-radius: 12px;
-      background: #f3f4f6;
-      font-size: 12px;
-      cursor: pointer;
-      transition: all 0.2s;
-      user-select: none;
-    }
-    .reaction:hover { background: #e5e7eb; }
-    .reaction.own { background: #ddd6fe; border: 1px solid #a78bfa; }
-    .file-attachment {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 12px;
-      background: rgba(0, 0, 0, 0.05);
-      border-radius: 6px;
-      margin-top: 6px;
-      font-size: 13px;
-    }
-    .file-attachment a {
-      color: inherit;
-      text-decoration: none;
-      font-weight: 500;
-    }
-    .file-attachment a:hover { text-decoration: underline; }
-    .chat-input {
-      padding: 16px 24px;
-      background: white;
-      border-top: 1px solid #e5e7eb;
-    }
-    .input-wrapper {
-      display: flex;
-      gap: 12px;
-      align-items: flex-end;
-    }
-    #msg-input {
-      flex: 1;
-      padding: 12px 16px;
-      border: 1px solid #e5e7eb;
-      border-radius: 24px;
-      font-size: 14px;
-      resize: none;
-      max-height: 120px;
-      font-family: inherit;
-    }
-    #msg-input:focus {
-      outline: none;
-      border-color: #667eea;
-    }
-    .input-actions {
-      display: flex;
-      gap: 8px;
-    }
-    .icon-btn {
-      width: 40px;
-      height: 40px;
-      border: none;
-      border-radius: 50%;
-      background: #f3f4f6;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: all 0.2s;
-      font-size: 18px;
-    }
-    .icon-btn:hover { background: #e5e7eb; }
-    .icon-btn.send {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-    }
-    .icon-btn.send:hover { transform: scale(1.05); }
-    .icon-btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-    .file-preview {
-      padding: 8px 12px;
-      background: #e0f2fe;
-      border-radius: 6px;
-      margin-top: 8px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 13px;
-    }
-    .file-preview button {
-      background: none;
-      border: none;
-      cursor: pointer;
-      font-size: 16px;
-      padding: 4px;
-    }
-    .modal {
-      display: none;
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      background: rgba(0, 0, 0, 0.5);
-      z-index: 1000;
-      align-items: center;
-      justify-content: center;
-    }
-    .modal.active { display: flex; }
-    .modal-content {
-      background: white;
-      padding: 24px;
-      border-radius: 12px;
-      max-width: 500px;
-      width: 90%;
-      max-height: 80vh;
-      overflow-y: auto;
-    }
-    .modal-content h3 { margin-bottom: 16px; color: #333; }
-    .modal-content input, .modal-content textarea {
-      width: 100%;
-      padding: 10px;
-      border: 1px solid #e5e7eb;
-      border-radius: 6px;
-      margin-bottom: 12px;
-      font-family: inherit;
-    }
-    .modal-content textarea { resize: vertical; min-height: 80px; }
-    .modal-actions {
-      display: flex;
-      gap: 8px;
-      justify-content: flex-end;
-      margin-top: 16px;
-    }
-    .emoji-picker {
-      position: absolute;
-      bottom: 100%;
-      left: 0;
-      background: white;
-      border: 1px solid #e5e7eb;
-      border-radius: 8px;
-      padding: 12px;
-      display: none;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-      z-index: 100;
-      margin-bottom: 8px;
-    }
-    .emoji-picker.active { display: block; }
-    .emoji-picker .emoji {
-      font-size: 24px;
-      cursor: pointer;
-      padding: 4px;
-      display: inline-block;
-      user-select: none;
-    }
-    .emoji-picker .emoji:hover { transform: scale(1.2); }
-    .deleted-msg {
-      opacity: 0.6;
-      font-style: italic;
-      color: #999;
-    }
-    .upload-progress {
-      padding: 8px 12px;
-      background: #dbeafe;
-      border-radius: 6px;
-      font-size: 12px;
-      color: #1e40af;
-      margin-top: 8px;
-    }
-    .invite-code-display {
-      background: #f9fafb;
-      padding: 12px;
-      border-radius: 8px;
-      border: 1px dashed #667eea;
-      margin: 12px 0;
-      font-family: monospace;
-      font-size: 14px;
-      word-break: break-all;
-    }
-    .copy-btn {
-      padding: 6px 12px;
-      background: #667eea;
-      color: white;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 12px;
-      margin-left: 8px;
-    }
-    .copy-btn:hover { background: #5568d3; }
-    .password-toggle {
-      position: absolute;
-      right: 10px;
-      top: 50%;
-      transform: translateY(-50%);
-      border: none;
-      background: none;
-      cursor: pointer;
-      font-size: 18px;
-    }
-    .input-with-toggle {
-      position: relative;
-      display: flex;
-      align-items: center;
-    }
-    .key-status {
-      display: inline-block;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      margin-right: 8px;
-    }
-    .key-status.ready { background: #16a34a; }
-    .key-status.waiting { background: #fbbf24; }
-    .modal-content label {
-      display: block;
-      font-weight: 600;
-      margin-bottom: 6px;
-      margin-top: 12px;
-      color: #333;
-    }
-  </style>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/chat.css') }}">
 </head>
 <body>
   <div class="chat-header">
     <div>
       <h1>
         <span>🔒</span>
-        <span>{{ room_name }}</span>
+        <span id="roomName">{{ room_name }}</span>
       </h1>
       <div class="status" id="status">
         <span class="key-status waiting" id="keyStatus"></span>
         <span id="statusText">Connecting...</span>
+        <button class="reconnect-btn" id="reconnectBtn" style="display: none;" onclick="reconnect()">Reconnect</button>
       </div>
     </div>
     <div class="actions">
@@ -585,8 +187,10 @@
       oldestMessageId: null,
       pendingFileMetadata: null,
       isUploading: false,
-      retryCount: 0,
-      keyRotationInProgress: false
+      connectionAttempts: 0,
+      maxConnectionAttempts: 3,
+      receivedMessageIds: new Set(),
+      isProcessingKeyRotation: false
     };
     let messages = {};
     let messageElements = {};
@@ -602,23 +206,487 @@
       return result;
     }
 
-    function updateStatus(msg, isReady = false) {
+    function updateStatus(msg, isReady = false, isError = false) {
       document.getElementById('statusText').textContent = msg;
       const keyStatus = document.getElementById('keyStatus');
       const sendBtn = document.getElementById('sendBtn');
       const msgInput = document.getElementById('msg-input');
+      const reconnectBtn = document.getElementById('reconnectBtn');
       
       if (isReady) {
         keyStatus.className = 'key-status ready';
         sendBtn.disabled = false;
         msgInput.disabled = false;
         msgInput.placeholder = 'Type a message...';
+        reconnectBtn.style.display = 'none';
+      } else if (isError) {
+        keyStatus.className = 'key-status error';
+        sendBtn.disabled = true;
+        msgInput.disabled = true;
+        msgInput.placeholder = 'Connection failed';
+        reconnectBtn.style.display = 'inline-block';
       } else {
         keyStatus.className = 'key-status waiting';
         sendBtn.disabled = true;
         msgInput.disabled = true;
         msgInput.placeholder = 'Waiting for encryption...';
+        reconnectBtn.style.display = 'none';
       }
+    }
+
+    function reconnect() {
+      console.log('[RECONNECT] Attempting to reconnect...');
+      updateStatus('Reconnecting...', false);
+      
+      if (socket) {
+        socket.disconnect();
+      }
+      
+      state.groupKey = null;
+      state.userKey = null;
+      state.keyReady = false;
+      state.keyVersion = -1;
+      state.connectionAttempts = 0;
+      state.receivedMessageIds.clear();
+      state.isProcessingKeyRotation = false;
+      
+      initializeSocket();
+    }
+
+    function initializeSocket() {
+      state.connectionAttempts++;
+      
+      if (state.connectionAttempts > state.maxConnectionAttempts) {
+        updateStatus('Connection failed. Please refresh page.', false, true);
+        return;
+      }
+      
+      console.log(`[CONNECT] Attempt ${state.connectionAttempts}/${state.maxConnectionAttempts}`);
+      
+      socket = io({ 
+        auth: { token: TOKEN, room_id: ROOM_ID },
+        transports: ['websocket', 'polling'],
+        timeout: 10000,
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000
+      });
+
+      socket.on('connect', () => {
+        console.log('✅ Connected to room', ROOM_ID);
+        updateStatus('Connected, exchanging keys...');
+        state.connectionAttempts = 0;
+      });
+
+      socket.on('error', (data) => {
+        console.error('❌ Socket error:', data);
+        addMessage({ text: `ERROR: ${data.msg}`, type: 'error' });
+        updateStatus('Connection error', false, true);
+      });
+
+      socket.on('connect_error', (error) => {
+        console.error('❌ Connection error:', error);
+        updateStatus('Connection failed - retrying...', false, true);
+        
+        setTimeout(() => {
+          if (state.connectionAttempts < state.maxConnectionAttempts) {
+            reconnect();
+          }
+        }, 2000);
+      });
+
+      socket.on('force_disconnect', () => {
+        console.log('🔌 Force disconnect received');
+        addMessage({ text: 'Session replaced - redirecting', type: 'error' });
+        setTimeout(() => window.location = '/hub', 1000);
+      });
+
+      socket.on('dh_pub', (data) => {
+        console.log('🔑 Received DH public key');
+        try {
+          const serverPub = BigInt('0x' + data.pub);
+          const shared = powMod(serverPub, state.priv, p);
+          const sharedHex = shared.toString(16).padStart(HEX_LEN, '0');
+          
+          state.userKey = CryptoJS.PBKDF2(
+            CryptoJS.enc.Hex.parse(sharedHex),
+            CryptoJS.enc.Utf8.parse(SALT),
+            { keySize: 8, iterations: ITERATIONS }
+          );
+          
+          const clientPub = powMod(g, state.priv, p);
+          const clientPubHex = clientPub.toString(16).padStart(HEX_LEN, '0');
+          socket.emit('dh_peer', { pub: clientPubHex });
+          updateStatus('Key exchange in progress...');
+          console.log('🔑 Sent DH peer key');
+        } catch (e) {
+          console.error('❌ DH error:', e);
+          addMessage({ text: 'Key exchange failed', type: 'error' });
+          updateStatus('Key exchange failed', false, true);
+        }
+      });
+
+      socket.on('group_key', (data) => {
+      console.log(`🔑 Received group key v${data.version}, status: ${data.status}`);
+      
+      if (!state.userKey) {
+        console.error('❌ User key not ready');
+        updateStatus('Key exchange incomplete', false, true);
+        return;
+      }
+      
+      try {
+        const encHex = data.enc;
+        console.log(`🔑 Encrypted key length: ${encHex.length} hex chars`);
+        
+        // Parse hex to bytes
+        const encBytes = CryptoJS.enc.Hex.parse(encHex);
+        console.log(`🔑 Encrypted bytes: ${encBytes.sigBytes} bytes`);
+        
+        // Extract IV (first 16 bytes)
+        const iv = CryptoJS.lib.WordArray.create(encBytes.words.slice(0, 4), 16);
+        
+        // Extract ciphertext
+        const ciphertext = CryptoJS.lib.WordArray.create(
+          encBytes.words.slice(4), 
+          encBytes.sigBytes - 16
+        );
+        
+        console.log(`🔑 IV: ${iv.sigBytes} bytes, Ciphertext: ${ciphertext.sigBytes} bytes`);
+        
+        // Decrypt the group key
+        const decrypted = CryptoJS.AES.decrypt(
+          { ciphertext: ciphertext },
+          state.userKey,
+          { 
+            iv: iv, 
+            mode: CryptoJS.mode.CBC, 
+            padding: CryptoJS.pad.Pkcs7 
+          }
+        );
+        
+        // CRITICAL: Validate decrypted key
+        if (!decrypted || decrypted.sigBytes === 0) {
+          throw new Error('Decryption resulted in empty key');
+        }
+        
+        if (decrypted.sigBytes !== 32) {
+          throw new Error(`Decrypted key has wrong length: ${decrypted.sigBytes} bytes (expected 32)`);
+        }
+        
+        console.log(`🔑 Decrypted group key: ${decrypted.sigBytes} bytes`);
+        
+        // TEST: Verify the key works by doing a test encrypt/decrypt
+        try {
+          const testMsg = 'test_message_' + Date.now();
+          const testEnc = safeEncrypt(testMsg, decrypted);
+          const testDec = safeDecrypt(testEnc, decrypted);
+          if (testDec !== testMsg) {
+            throw new Error('Key validation test failed');
+          }
+          console.log('🔑 ✓ Key validation test passed');
+        } catch (e) {
+          throw new Error(`Key validation failed: ${e.message}`);
+        }
+        
+        // Update state
+        const oldVersion = state.keyVersion;
+        state.groupKey = decrypted;
+        state.keyVersion = data.version || 0;
+        
+        console.log(`🔑 Key updated from v${oldVersion} to v${state.keyVersion}`);
+        
+        if (data.status === 'rotated') {
+          console.log(`🔄 Key rotation complete to v${state.keyVersion}`);
+          
+          state.isProcessingKeyRotation = false;
+          state.keyReady = true;
+          
+          updateStatus(`Ready - Encrypted Chat (v${state.keyVersion})`, true);
+          
+          addMessage({ 
+            text: `🔑 Security key updated to v${state.keyVersion}. You can now chat securely.`, 
+            type: 'sys', 
+            timestamp: Date.now() / 1000 
+          });
+          
+          console.log(`✅ Ready with v${state.keyVersion}`);
+          
+        } else {
+          console.log(`✅ Initial key v${state.keyVersion} received`);
+          state.keyReady = true;
+          updateStatus(`Ready - Encrypted Chat (v${state.keyVersion})`, true);
+          
+          setTimeout(() => {
+            console.log('📢 Notifying server client is ready');
+            socket.emit('client_ready');
+          }, 100);
+        }
+        
+      } catch (e) {
+        console.error('❌ Key decryption error:', e);
+        console.error('Stack:', e.stack);
+        addMessage({ 
+          text: `❌ Key decryption failed: ${e.message}. Please refresh the page.`, 
+          type: 'error', 
+          timestamp: Date.now() / 1000 
+        });
+        updateStatus('Key decryption failed', false, true);
+      }
+    });
+
+      socket.on('message_history', (data) => {
+        console.log(`📜 Received ${data.messages?.length || 0} history messages`);
+        if (!data.messages || !data.messages.length) return;
+        
+        data.messages.forEach((msg, idx) => {
+          if (state.receivedMessageIds.has(msg.id)) {
+            return;
+          }
+          
+          try {
+            const text = safeDecrypt(msg.enc, state.groupKey);
+            addMessage({
+              id: msg.id,
+              sender: msg.sender,
+              text: text,
+              timestamp: msg.timestamp,
+              reactions: msg.reactions || {},
+              file_metadata: msg.file_metadata
+            }, idx < data.messages.length - 5);
+            
+            state.receivedMessageIds.add(msg.id);
+            
+            if (!state.oldestMessageId || msg.id < state.oldestMessageId) {
+              state.oldestMessageId = msg.id;
+            }
+          } catch (e) {
+            console.error('❌ History decrypt error for msg', msg.id, e);
+          }
+        });
+        
+        if (data.messages.length >= 50) {
+          document.getElementById('loadMore').style.display = 'block';
+        }
+      });
+
+      socket.on('more_messages', (data) => {
+        if (!data.messages || !data.messages.length) {
+          document.getElementById('loadMore').style.display = 'none';
+          return;
+        }
+        
+        const container = document.getElementById('messages');
+        const oldHeight = container.scrollHeight;
+        const oldScroll = container.scrollTop;
+        
+        data.messages.forEach(msg => {
+          if (state.receivedMessageIds.has(msg.id)) {
+            return;
+          }
+          
+          try {
+            const text = safeDecrypt(msg.enc, state.groupKey);
+            const div = document.createElement('div');
+            div.className = `msg ${msg.sender === USERNAME ? 'own' : ''}`;
+            div.dataset.msgId = msg.id;
+            
+            div.innerHTML = `
+              <div class="msg-header">
+                <strong>${escapeHtml(msg.sender)}</strong>
+                <span>${new Date(msg.timestamp * 1000).toLocaleTimeString()}</span>
+              </div>
+              <div class="msg-body">${escapeHtml(text)}</div>
+              <div class="reactions" data-msg-id="${msg.id}"></div>
+            `;
+            
+            container.insertBefore(div, document.getElementById('loadMore').nextSibling);
+            
+            state.receivedMessageIds.add(msg.id);
+            
+            if (!state.oldestMessageId || msg.id < state.oldestMessageId) {
+              state.oldestMessageId = msg.id;
+            }
+            
+            messages[msg.id] = { ...msg, text };
+            messageElements[msg.id] = div;
+          } catch (e) {
+            console.error('❌ Decrypt error for msg', msg.id);
+          }
+        });
+        
+        container.scrollTop = oldScroll + (container.scrollHeight - oldHeight);
+        
+        if (data.messages.length < 50) {
+          document.getElementById('loadMore').style.display = 'none';
+        }
+      });
+
+      socket.on('sys_msg', (data) => {
+        let text = '';
+        if (data.type === 'joined') text = `→ ${data.user} joined`;
+        else if (data.type === 'disconnected') text = `← ${data.user} disconnected`;
+        else if (data.type === 'kicked') {
+          text = `⊗ ${data.msg}`;
+          
+          // CRITICAL: Pause and wait for new key
+          console.log('🔄 Kick detected, pausing until new key...');
+          state.isProcessingKeyRotation = true;
+          state.keyReady = false;
+          updateStatus('Key rotation in progress...', false);
+          
+          // Clear old key to prevent wrong decryption
+          state.groupKey = null;
+        }
+        else if (data.type === 'admin_transfer') text = `👑 ${data.msg}`;
+        else if (data.type === 'left') text = data.msg;
+        
+        addMessage({ text, type: 'sys', timestamp: Date.now() / 1000 });
+      });
+
+      socket.on('member_list_update', (data) => {
+        if (data.members) {
+          updateMemberList(data.members);
+        }
+      });
+
+      socket.on('encrypted_msg', (data) => {
+        console.log(`📨 Incoming from ${data.sender}, msg v${data.key_version}, our v${state.keyVersion}`);
+        
+        if (state.receivedMessageIds.has(data.id)) {
+          console.log(`⏭️ Duplicate ${data.id}`);
+          return;
+        }
+        
+        if (!state.keyReady || !state.groupKey) {
+          console.log(`⏳ Not ready, ${data.id} in history later`);
+          return;
+        }
+        
+        try {
+          const text = safeDecrypt(data.enc, state.groupKey);
+          console.log(`✅ Decrypted from ${data.sender}`);
+          
+          addMessage({
+            id: data.id,
+            sender: data.sender,
+            text: text,
+            timestamp: data.timestamp,
+            reactions: data.reactions || {},
+            file_metadata: data.file_metadata
+          });
+          
+          state.receivedMessageIds.add(data.id);
+        } catch (e) {
+          console.error(`❌ Decrypt fail ${data.id}:`, e);
+          
+          addMessage({
+            id: data.id,
+            sender: data.sender,
+            text: `[Decryption error: msg v${data.key_version}, you have v${state.keyVersion}]`,
+            timestamp: data.timestamp,
+            reactions: {},
+            type: 'error'
+          });
+          
+          state.receivedMessageIds.add(data.id);
+        }
+      });
+
+      socket.on('message_deleted', (data) => {
+        const msgEl = messageElements[data.message_id];
+        if (msgEl) {
+          const body = msgEl.querySelector('.msg-body');
+          body.className = 'msg-body deleted-msg';
+          body.textContent = '[Message deleted]';
+          const actions = msgEl.querySelector('.msg-actions');
+          if (actions) actions.remove();
+        }
+      });
+
+      socket.on('reaction_update', (data) => {
+        const msgEl = messageElements[data.message_id];
+        if (msgEl) {
+          const reactDiv = msgEl.querySelector('.reactions');
+          if (reactDiv && data.all_reactions) {
+            updateReactionsUI(reactDiv, data.all_reactions, data.message_id);
+            
+            if (messages[data.message_id]) {
+              messages[data.message_id].reactions = data.all_reactions;
+            }
+          }
+        }
+      });
+
+      socket.on('file_uploaded', (data) => {
+        state.pendingFileMetadata = data;
+        state.isUploading = false;
+        
+        const container = document.getElementById('filePreviewContainer');
+        container.innerHTML = `
+          <div class="file-preview">
+            <span>📎 ${escapeHtml(data.filename)} (${formatBytes(data.size)})</span>
+            <button onclick="clearFileAttachment()">❌</button>
+          </div>
+        `;
+        
+        document.getElementById('uploadProgress').style.display = 'none';
+        document.getElementById('attachBtn').disabled = false;
+        document.getElementById('sendBtn').disabled = false;
+      });
+
+      socket.on('upload_error', (data) => {
+        alert(data.msg || 'File upload failed');
+        state.isUploading = false;
+        state.pendingFileMetadata = null;
+        document.getElementById('uploadProgress').style.display = 'none';
+        document.getElementById('filePreviewContainer').innerHTML = '';
+        document.getElementById('attachBtn').disabled = false;
+        document.getElementById('sendBtn').disabled = false;
+      });
+
+      socket.on('kicked', () => {
+        alert('You were kicked from this room');
+        window.location = '/hub';
+      });
+
+      socket.on('room_left', () => {
+        window.location = '/hub';
+      });
+
+      socket.on('room_deleted', (data) => {
+        alert('This room has been deleted');
+        window.location = '/hub';
+      });
+
+      socket.on('disconnect', (reason) => {
+        console.log(`🔌 Disconnected: ${reason}`);
+        if (reason === 'io server disconnect') {
+          updateStatus('Disconnected from server - reconnecting...', false, true);
+          setTimeout(reconnect, 1000);
+        } else {
+          updateStatus('Connection lost - reconnecting...', false, true);
+        }
+      });
+
+      socket.on('room_updated', (data) => {
+        if (data.room_id === ROOM_ID) {
+          document.getElementById('roomName').textContent = data.name;
+          document.title = data.name + ' - Secure Chat';
+          
+          addMessage({ 
+            text: `Room updated: ${data.name}`,
+            type: 'sys',
+            timestamp: Date.now() / 1000
+          });
+          
+          if (data.refresh) {
+            setTimeout(() => {
+              window.location.reload();
+            }, 2000);
+          }
+        }
+      });
     }
 
     function addMessage(data, skipScroll = false) {
@@ -736,396 +804,163 @@
     }
 
     function safeDecrypt(encHex, key) {
-      try {
-        const enc = CryptoJS.enc.Hex.parse(encHex);
-        if (enc.sigBytes < 32) throw new Error('Too short');
-        
-        const iv = enc.clone();
-        iv.sigBytes = 16;
-        let ciphertext = enc.clone();
-        ciphertext.clamp();
-        ciphertext.words.splice(0, 4);
-        ciphertext.sigBytes -= 16;
-        ciphertext.sigBytes = Math.floor(ciphertext.sigBytes / 4) * 4;
-        
-        if (ciphertext.sigBytes < 16 || ciphertext.sigBytes % 16 !== 0) {
-          throw new Error('Invalid len');
-        }
-        
-        const decrypted = CryptoJS.AES.decrypt(
-          { ciphertext: ciphertext },
-          key,
-          { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
-        );
-        
-        const text = decrypted.toString(CryptoJS.enc.Utf8);
-        if (!text || text.length === 0) throw new Error('Bad padding');
-        
-        return text;
-      } catch (e) {
-        console.error('Decrypt error:', e);
-        throw e;
+    try {
+      // CRITICAL: Validate inputs
+      if (!encHex || typeof encHex !== 'string') {
+        throw new Error('Invalid encrypted data: not a string');
       }
+      
+      if (encHex.length < 64) {  // IV(32 hex chars) + minimum ciphertext(32 hex chars)
+        throw new Error(`Encrypted data too short: ${encHex.length} hex chars (need at least 64)`);
+      }
+      
+      if (!key || !key.sigBytes || key.sigBytes === 0) {
+        throw new Error('Invalid decryption key: key is null or empty');
+      }
+      
+      if (key.sigBytes !== 32) {
+        throw new Error(`Invalid key length: ${key.sigBytes} bytes (expected 32)`);
+      }
+      
+      // Parse hex to WordArray
+      const allBytes = CryptoJS.enc.Hex.parse(encHex);
+      
+      if (!allBytes || allBytes.sigBytes < 32) {
+        throw new Error(`Parsed bytes too short: ${allBytes ? allBytes.sigBytes : 0} bytes`);
+      }
+      
+      // Extract IV (first 16 bytes = 4 words)
+      const iv = CryptoJS.lib.WordArray.create(allBytes.words.slice(0, 4), 16);
+      
+      // Extract ciphertext (remaining bytes)
+      const ciphertextWords = allBytes.words.slice(4);
+      const ciphertextBytes = allBytes.sigBytes - 16;
+      
+      if (ciphertextBytes <= 0) {
+        throw new Error('No ciphertext after IV extraction');
+      }
+      
+      if (ciphertextBytes % 16 !== 0) {
+        throw new Error(`Ciphertext not block-aligned: ${ciphertextBytes} bytes`);
+      }
+      
+      const ciphertext = CryptoJS.lib.WordArray.create(ciphertextWords, ciphertextBytes);
+      
+      // Decrypt using AES-256-CBC
+      const decrypted = CryptoJS.AES.decrypt(
+        { ciphertext: ciphertext },
+        key,
+        { 
+          iv: iv, 
+          mode: CryptoJS.mode.CBC, 
+          padding: CryptoJS.pad.Pkcs7 
+        }
+      );
+      
+      // CRITICAL: Check if decryption produced valid output
+      if (!decrypted || decrypted.sigBytes === 0) {
+        throw new Error('Decryption produced empty result');
+      }
+      
+      // Convert to UTF-8 text
+      const text = decrypted.toString(CryptoJS.enc.Utf8);
+      
+      if (!text || text.length === 0) {
+        throw new Error('Decryption resulted in empty text (wrong key or corrupted data)');
+      }
+      
+      // Validate the text contains valid UTF-8
+      if (text.includes('\ufffd')) {  // Replacement character indicates invalid UTF-8
+        throw new Error('Decryption produced invalid UTF-8 text');
+      }
+      
+      return text;
+      
+    } catch (e) {
+      console.error('❌ Decrypt error details:', {
+        error: e.message,
+        encHexLength: encHex ? encHex.length : 0,
+        keyValid: !!(key && key.sigBytes === 32),
+        keyBytes: key ? key.sigBytes : 0
+      });
+      throw new Error(`Decryption failed: ${e.message}`);
     }
-
-    socket = io({ auth: { token: TOKEN, room_id: ROOM_ID } });
-
-    socket.on('connect', () => {
-      console.log('Connected to room', ROOM_ID);
-      updateStatus('Connected, exchanging keys...');
-    });
-
-    socket.on('error', (data) => {
-      addMessage({ text: `ERROR: ${data.msg}`, type: 'error' });
-      updateStatus('Error');
-    });
-
-    socket.on('force_disconnect', () => {
-      addMessage({ text: 'Session replaced - redirecting', type: 'error' });
-      setTimeout(() => window.location = '/hub', 1000);
-    });
-
-    socket.on('dh_pub', (data) => {
-      try {
-        const serverPub = BigInt('0x' + data.pub);
-        const shared = powMod(serverPub, state.priv, p);
-        const sharedHex = shared.toString(16).padStart(HEX_LEN, '0');
-        
-        state.userKey = CryptoJS.PBKDF2(
-          CryptoJS.enc.Hex.parse(sharedHex),
-          CryptoJS.enc.Utf8.parse(SALT),
-          { keySize: 8, iterations: ITERATIONS }
-        );
-        
-        const clientPub = powMod(g, state.priv, p);
-        const clientPubHex = clientPub.toString(16).padStart(HEX_LEN, '0');
-        socket.emit('dh_peer', { pub: clientPubHex });
-        updateStatus('Waiting for encryption key...');
-      } catch (e) {
-        console.error('DH error:', e);
-        addMessage({ text: 'Key exchange failed', type: 'error' });
+  }
+   
+  function safeEncrypt(text, key) {
+  try {
+    // CRITICAL: Validate inputs
+    if (!text || typeof text !== 'string' || text.length === 0) {
+      throw new Error('Cannot encrypt empty or invalid text');
+    }
+    
+    if (!key || !key.sigBytes || key.sigBytes === 0) {
+      throw new Error('Invalid encryption key: key is null or empty');
+    }
+    
+    if (key.sigBytes !== 32) {
+      throw new Error(`Invalid key length: ${key.sigBytes} bytes (expected 32)`);
+    }
+    
+    // Convert text to UTF-8 bytes
+    const msgBytes = CryptoJS.enc.Utf8.parse(text);
+    
+    if (!msgBytes || msgBytes.sigBytes === 0) {
+      throw new Error('Failed to convert text to bytes');
+    }
+    
+    // Generate random IV (16 bytes)
+    const iv = CryptoJS.lib.WordArray.random(16);
+    
+    // Encrypt using AES-256-CBC
+    const encrypted = CryptoJS.AES.encrypt(
+      msgBytes, 
+      key, 
+      {
+        iv: iv,
+        mode: CryptoJS.mode.CBC,
+        padding: CryptoJS.pad.Pkcs7
       }
-    });
-
-    let pendingMessages = [];  // Queue for messages during key rotation
-    let isProcessingKey = false;  // Track if we're processing a key
-
-    socket.on('group_key', (data) => {
-      if (!state.userKey) {
-        console.warn('User key not ready, retrying...');
-        if (state.retryCount < 3) {
-          state.retryCount++;
-          setTimeout(() => {
-            if (state.userKey) {
-              console.log('User key now ready');
-            }
-          }, 500);
-        }
-        return;
+    );
+    
+    // CRITICAL: Validate encryption produced output
+    if (!encrypted || !encrypted.ciphertext || encrypted.ciphertext.sigBytes === 0) {
+      throw new Error('Encryption produced empty result');
+    }
+    
+    // Combine IV + ciphertext
+    const combined = iv.clone().concat(encrypted.ciphertext);
+    
+    // Convert to hex
+    const hexResult = combined.toString(CryptoJS.enc.Hex);
+    
+    // CRITICAL: Validate output format
+    if (!hexResult || hexResult.length < 64) {
+      throw new Error(`Encryption produced invalid output: ${hexResult ? hexResult.length : 0} hex chars`);
+    }
+    
+    // TEST: Decrypt locally to verify
+    try {
+      const testDecrypt = safeDecrypt(hexResult, key);
+      if (testDecrypt !== text) {
+        throw new Error('Local encryption verification failed');
       }
-      
-      if (isProcessingKey) {
-        console.warn('Already processing a key, ignoring duplicate');
-        return;
-      }
-      
-      isProcessingKey = true;
-      
-      try {
-        const encBytes = CryptoJS.enc.Hex.parse(data.enc);
-        const iv = encBytes.clone();
-        iv.sigBytes = 16;
-        let encBody = encBytes.clone();
-        encBody.clamp();
-        encBody.words.splice(0, 4);
-        encBody.sigBytes -= 16;
-        encBody.sigBytes = Math.floor(encBody.sigBytes / 4) * 4;
-        
-        const decrypted = CryptoJS.AES.decrypt(
-          { ciphertext: encBody },
-          state.userKey,
-          { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
-        );
-        
-        const version = data.version || 0;
-        const oldVersion = state.keyVersion;
-        
-        // Update the key IMMEDIATELY
-        state.groupKey = decrypted;
-        state.keyVersion = version;
-        
-        if (data.status === 'rotated') {
-          // Key rotation - update immediately and process pending
-          console.log(`[KEY_ROTATION] Received v${version} (from v${oldVersion}), updating immediately`);
-          
-          // Mark ready immediately for rotation - key is already decrypted
-          state.keyReady = true;
-          state.keyRotationInProgress = false;
-          isProcessingKey = false;
-          updateStatus(`Ready - Encrypted Chat (v${version})`, true);
-          
-          // Process pending messages NOW with new key
-          if (pendingMessages.length > 0) {
-            console.log(`[KEY_ROTATION] Processing ${pendingMessages.length} pending messages`);
-            pendingMessages.forEach(msgData => {
-              try {
-                const text = safeDecrypt(msgData.enc, state.groupKey);
-                addMessage({
-                  id: msgData.id,
-                  sender: msgData.sender,
-                  text: text,
-                  timestamp: msgData.timestamp,
-                  reactions: msgData.reactions || {},
-                  file_metadata: msgData.file_metadata
-                });
-              } catch (e) {
-                console.error('Failed to decrypt pending message:', e);
-              }
-            });
-            pendingMessages = [];
-          }
-          
-          addMessage({ text: `🔑 Security key rotated to v${version}`, type: 'sys', timestamp: Date.now() / 1000 });
-        } else {
-          // Initial key - use requestAnimationFrame for UI setup
-          console.log(`[KEY] Received initial v${version}, processing...`);
-          
-          requestAnimationFrame(() => {
-            state.keyReady = true;
-            isProcessingKey = false;
-            updateStatus(`Ready - Encrypted Chat (v${version})`, true);
-            console.log(`[KEY] Ready with v${version}, requesting notifications and history`);
-            
-            // Tell server we're ready NOW
-            socket.emit('client_ready');
-          });
-        }
-        
-        console.log(`[KEY] Updated to v${version}, status: ${data.status}`);
-      } catch (e) {
-        isProcessingKey = false;
-        console.error('Key decrypt error:', e);
-        addMessage({ text: 'Key decryption failed. Please refresh.', type: 'error' });
-      }
+    } catch (e) {
+      throw new Error(`Encryption verification failed: ${e.message}`);
+    }
+    
+    return hexResult;
+    
+  } catch (e) {
+    console.error('❌ Encrypt error:', {
+      error: e.message,
+      textLength: text ? text.length : 0,
+      keyValid: !!(key && key.sigBytes === 32),
+      keyBytes: key ? key.sigBytes : 0
     });
-
-    socket.on('message_history', (data) => {
-      if (!data.messages || !data.messages.length) return;
-      
-      data.messages.forEach((msg, idx) => {
-        try {
-          const text = safeDecrypt(msg.enc, state.groupKey);
-          addMessage({
-            id: msg.id,
-            sender: msg.sender,
-            text: text,
-            timestamp: msg.timestamp,
-            reactions: msg.reactions || {},
-            file_metadata: msg.file_metadata
-          }, idx < data.messages.length - 5);
-          
-          if (!state.oldestMessageId || msg.id < state.oldestMessageId) {
-            state.oldestMessageId = msg.id;
-          }
-        } catch (e) {
-          console.error('History decrypt error for msg', msg.id, e);
-        }
-      });
-      
-      if (data.messages.length >= 50) {
-        document.getElementById('loadMore').style.display = 'block';
-      }
-    });
-
-    socket.on('more_messages', (data) => {
-      if (!data.messages || !data.messages.length) {
-        document.getElementById('loadMore').style.display = 'none';
-        return;
-      }
-      
-      const container = document.getElementById('messages');
-      const oldHeight = container.scrollHeight;
-      const oldScroll = container.scrollTop;
-      
-      data.messages.forEach(msg => {
-        try {
-          const text = safeDecrypt(msg.enc, state.groupKey);
-          const div = document.createElement('div');
-          div.className = `msg ${msg.sender === USERNAME ? 'own' : ''}`;
-          div.dataset.msgId = msg.id;
-          
-          div.innerHTML = `
-            <div class="msg-header">
-              <strong>${escapeHtml(msg.sender)}</strong>
-              <span>${new Date(msg.timestamp * 1000).toLocaleTimeString()}</span>
-            </div>
-            <div class="msg-body">${escapeHtml(text)}</div>
-            <div class="reactions" data-msg-id="${msg.id}"></div>
-          `;
-          
-          container.insertBefore(div, document.getElementById('loadMore').nextSibling);
-          
-          if (!state.oldestMessageId || msg.id < state.oldestMessageId) {
-            state.oldestMessageId = msg.id;
-          }
-          
-          messages[msg.id] = { ...msg, text };
-          messageElements[msg.id] = div;
-        } catch (e) {
-          console.error('Decrypt error for msg', msg.id);
-        }
-      });
-      
-      container.scrollTop = oldScroll + (container.scrollHeight - oldHeight);
-      
-      if (data.messages.length < 50) {
-        document.getElementById('loadMore').style.display = 'none';
-      }
-    });
-
-    socket.on('sys_msg', (data) => {
-      let text = '';
-      if (data.type === 'joined') text = `→ ${data.user} joined`;
-      else if (data.type === 'disconnected') text = `← ${data.user} disconnected`;
-      else if (data.type === 'kicked') {
-        text = `⊗ ${data.msg}`;
-        // Mark key rotation in progress when kick notification arrives
-        state.keyRotationInProgress = true;
-        state.keyReady = false;
-        console.log('[SYS] Kick detected, marking key rotation in progress');
-      }
-      else if (data.type === 'admin_transfer') text = `👑 ${data.msg}`;
-      else if (data.type === 'left') text = data.msg;
-      
-      addMessage({ text, type: 'sys', timestamp: Date.now() / 1000 });
-    });
-
-    socket.on('member_list_update', (data) => {
-      if (data.members) {
-        updateMemberList(data.members);
-      }
-    });
-
-    socket.on('encrypted_msg', (data) => {
-      // If key rotation is in progress, queue the message
-      if (state.keyRotationInProgress) {
-        console.log(`[MSG_QUEUE] Queuing message from ${data.sender} during key rotation`);
-        pendingMessages.push(data);
-        return;
-      }
-      
-      if (!state.keyReady || !state.groupKey) {
-        console.warn('Received message but key not ready');
-        
-        // Queue message to retry after key is ready
-        setTimeout(() => {
-          if (state.keyReady && state.groupKey) {
-            console.log('Key now ready, retrying message decrypt');
-            socket.emit('request_retry_message', { message_id: data.id });
-          } else {
-            addMessage({
-              text: `[Message from ${data.sender} - waiting for encryption key...]`,
-              type: 'error',
-              timestamp: data.timestamp
-            });
-          }
-        }, 1000);
-        return;
-      }
-      
-      try {
-        const text = safeDecrypt(data.enc, state.groupKey);
-        addMessage({
-          id: data.id,
-          sender: data.sender,
-          text: text,
-          timestamp: data.timestamp,
-          reactions: data.reactions || {},
-          file_metadata: data.file_metadata
-        });
-      } catch (e) {
-        console.error('Message decrypt error', e);
-        console.log('Message key_version:', data.key_version, 'Current key version:', state.keyVersion);
-        
-        // If key version mismatch, might be during rotation - queue for retry
-        if (data.key_version !== state.keyVersion) {
-          console.warn('Key version mismatch, queueing for retry after rotation...');
-          pendingMessages.push(data);
-        } else {
-          addMessage({
-            text: `[Message from ${data.sender} - decryption failed]`,
-            type: 'error',
-            timestamp: data.timestamp
-          });
-        }
-      }
-    });
-
-    socket.on('message_deleted', (data) => {
-      const msgEl = messageElements[data.message_id];
-      if (msgEl) {
-        const body = msgEl.querySelector('.msg-body');
-        body.className = 'msg-body deleted-msg';
-        body.textContent = '[Message deleted]';
-        const actions = msgEl.querySelector('.msg-actions');
-        if (actions) actions.remove();
-      }
-    });
-
-    socket.on('reaction_update', (data) => {
-      const msgEl = messageElements[data.message_id];
-      if (msgEl) {
-        const reactDiv = msgEl.querySelector('.reactions');
-        if (reactDiv && data.all_reactions) {
-          updateReactionsUI(reactDiv, data.all_reactions, data.message_id);
-          
-          if (messages[data.message_id]) {
-            messages[data.message_id].reactions = data.all_reactions;
-          }
-        }
-      }
-    });
-
-    socket.on('file_uploaded', (data) => {
-      state.pendingFileMetadata = data;
-      state.isUploading = false;
-      
-      const container = document.getElementById('filePreviewContainer');
-      container.innerHTML = `
-        <div class="file-preview">
-          <span>📎 ${escapeHtml(data.filename)} (${formatBytes(data.size)})</span>
-          <button onclick="clearFileAttachment()">❌</button>
-        </div>
-      `;
-      
-      document.getElementById('uploadProgress').style.display = 'none';
-      document.getElementById('attachBtn').disabled = false;
-      document.getElementById('sendBtn').disabled = false;
-    });
-
-    socket.on('upload_error', (data) => {
-      alert(data.msg || 'File upload failed');
-      state.isUploading = false;
-      state.pendingFileMetadata = null;
-      document.getElementById('uploadProgress').style.display = 'none';
-      document.getElementById('filePreviewContainer').innerHTML = '';
-      document.getElementById('attachBtn').disabled = false;
-      document.getElementById('sendBtn').disabled = false;
-    });
-
-    socket.on('kicked', () => {
-      alert('You were kicked from this room');
-      window.location = '/hub';
-    });
-
-    socket.on('room_left', () => {
-      window.location = '/hub';
-    });
-
-    socket.on('room_deleted', (data) => {
-      alert('This room has been deleted');
-      window.location = '/hub';
-    });
+    throw new Error(`Encryption failed: ${e.message}`);
+  }
+}
 
     window.addEventListener('load', () => {
       const priv_hex = Array.from({ length: 256 }, () =>
@@ -1145,6 +980,8 @@
           sendMessage();
         }
       });
+      
+      initializeSocket();
     });
 
     function sendMessage() {
@@ -1153,18 +990,19 @@
       
       if (!msg && !state.pendingFileMetadata) return;
       
-      if (state.keyRotationInProgress) {
+      if (!socket || !socket.connected) {
         addMessage({
-          text: '⚠️ Key rotation in progress. Please wait a moment...',
+          text: '⚠️ Not connected to server. Please wait...',
           type: 'error',
           timestamp: Date.now() / 1000
         });
+        reconnect();
         return;
       }
       
       if (!state.keyReady || !state.groupKey) {
         addMessage({
-          text: '⚠️ Encryption not ready yet. Please wait a moment...',
+          text: '⚠️ Encryption key not ready yet. Please wait...',
           type: 'error',
           timestamp: Date.now() / 1000
         });
@@ -1178,29 +1016,28 @@
       
       try {
         const displayText = msg || (state.pendingFileMetadata ? state.pendingFileMetadata.filename : '[File]');
-        const msgBytes = CryptoJS.enc.Utf8.parse(displayText);
-        const iv = CryptoJS.lib.WordArray.random(16);
-        const encrypted = CryptoJS.AES.encrypt(msgBytes, state.groupKey, {
-          iv: iv,
-          mode: CryptoJS.mode.CBC,
-          padding: CryptoJS.pad.Pkcs7
-        });
-        const encWithIv = iv.concat(encrypted.ciphertext);
+        
+        // Use the bulletproof encrypt function
+        const encryptedHex = safeEncrypt(displayText, state.groupKey);
+        
+        console.log(`📤 Sending message (${displayText.length} chars, ${encryptedHex.length} hex), key v${state.keyVersion}`);
         
         socket.emit('message', {
-          enc: encWithIv.toString(CryptoJS.enc.Hex),
+          enc: encryptedHex,
           file_metadata: state.pendingFileMetadata
         });
         
         input.value = '';
         input.style.height = 'auto';
         clearFileAttachment();
+        input.focus();
+        
       } catch (e) {
-        console.error('Encrypt error:', e);
-        alert('Failed to send message. Please try again.');
+        console.error('❌ Encrypt error:', e);
+        alert('Failed to send message: ' + e.message);
       }
     }
-
+    
     function clearFileAttachment() {
       state.pendingFileMetadata = null;
       document.getElementById('filePreviewContainer').innerHTML = '';
@@ -1494,6 +1331,15 @@
         }, 100);
       }
     }
+
+    function checkConnection() {
+      if (!socket || !socket.connected) {
+        console.log('[CONNECTION] Socket disconnected, attempting to reconnect...');
+        reconnect();
+      }
+    }
+
+    setInterval(checkConnection, 5000);
 
     window.onclick = function(event) {
       if (event.target.classList.contains('modal')) {

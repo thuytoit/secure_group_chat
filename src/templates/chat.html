@@ -302,29 +302,63 @@
       });
 
       socket.on('dh_pub', (data) => {
-        console.log('🔑 Received DH public key');
-        try {
-          const serverPub = BigInt('0x' + data.pub);
-          const shared = powMod(serverPub, state.priv, p);
-          const sharedHex = shared.toString(16).padStart(HEX_LEN, '0');
-          
-          state.userKey = CryptoJS.PBKDF2(
-            CryptoJS.enc.Hex.parse(sharedHex),
-            CryptoJS.enc.Utf8.parse(SALT),
-            { keySize: 8, iterations: ITERATIONS }
-          );
-          
-          const clientPub = powMod(g, state.priv, p);
-          const clientPubHex = clientPub.toString(16).padStart(HEX_LEN, '0');
-          socket.emit('dh_peer', { pub: clientPubHex });
-          updateStatus('Key exchange in progress...');
-          console.log('🔑 Sent DH peer key');
-        } catch (e) {
-          console.error('❌ DH error:', e);
-          addMessage({ text: 'Key exchange failed', type: 'error' });
-          updateStatus('Key exchange failed', false, true);
-        }
-      });
+  console.log('🔑 Received DH public key');
+  try {
+    // ============ CRITICAL FIX START ============
+    
+    // Server's public key
+    const serverPub = BigInt('0x' + data.pub);
+    
+    // Compute DH shared secret
+    const shared = powMod(serverPub, state.priv, p);
+    
+    // Convert BigInt to byte array (big-endian) - MUST MATCH PYTHON!
+    let sharedBytes = [];
+    let temp = shared;
+    
+    // Extract bytes from BigInt (big-endian order)
+    while (temp > 0n) {
+      sharedBytes.unshift(Number(temp & 0xFFn));
+      temp >>= 8n;
+    }
+    
+    // Python does: shared.ljust(32, b'\x00')[:32]
+    // Meaning: pad to 32 bytes with zeros at END, then take first 32
+    while (sharedBytes.length < 32) {
+      sharedBytes.push(0);  // Pad at end
+    }
+    if (sharedBytes.length > 32) {
+      sharedBytes = sharedBytes.slice(0, 32);  // Truncate to 32
+    }
+    
+    console.log(`🔑 DH shared secret: ${sharedBytes.length} bytes`);
+    
+    // Create CryptoJS WordArray from exactly 32 bytes
+    const sharedWordArray = CryptoJS.lib.WordArray.create(sharedBytes);
+    
+    // Derive user key - now matches Python's derive_key()
+    state.userKey = CryptoJS.PBKDF2(
+      sharedWordArray,
+      CryptoJS.enc.Utf8.parse(SALT),
+      { keySize: 8, iterations: ITERATIONS }
+    );
+    
+    // ============ CRITICAL FIX END ============
+    
+    console.log(`🔑 User key derived: ${state.userKey.sigBytes} bytes`);
+    
+    // Send our public key to server
+    const clientPub = powMod(g, state.priv, p);
+    const clientPubHex = clientPub.toString(16).padStart(HEX_LEN, '0');
+    socket.emit('dh_peer', { pub: clientPubHex });
+    updateStatus('Key exchange in progress...');
+    console.log('🔑 Sent DH peer key');
+  } catch (e) {
+    console.error('❌ DH error:', e);
+    addMessage({ text: 'Key exchange failed', type: 'error' });
+    updateStatus('Key exchange failed', false, true);
+  }
+});
 
       socket.on('group_key', (data) => {
         console.log(`🔑 Received group key v${data.version}, status: ${data.status}`);
