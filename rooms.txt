@@ -28,9 +28,13 @@ class RoomManager:
         pass
     
     def create_room(self, name: str, creator: str, room_type: str = 'public',
-                password: Optional[str] = None, description: str = '',
-                max_members: int = 50) -> Tuple[bool, Optional[str], str]:
-        """Create a new room with deterministic encryption key"""
+                   password: Optional[str] = None, description: str = '',
+                   max_members: int = 50) -> Tuple[bool, Optional[str], str]:
+        """
+        Create a new room with SIMPLIFIED access control:
+        - Public rooms: no password, no invite code
+        - Private rooms: ALWAYS have invite code, OPTIONAL password
+        """
         if not name or len(name) > 50:
             return False, None, "Invalid room name"
         
@@ -41,11 +45,14 @@ class RoomManager:
         invite_code = None
         
         if room_type == 'private':
+            # ALWAYS generate invite code for private rooms
             invite_code = generate_invite_code()
+            
+            # Optional password protection
             if password:
                 password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
         
-        # Create room in database FIRST
+        # Create room in database
         success = db.create_room(
             room_id=room_id,
             name=name,
@@ -60,38 +67,19 @@ class RoomManager:
         if not success:
             return False, None, "Room name already exists"
         
-        # CRITICAL FIX: Generate deterministic key from room_id
-        # This ensures the same key is always generated for the same room
-        initial_key = self._derive_room_key(room_id, version=0)
-        
+        # Generate initial encryption key ONCE and store it
+        initial_key = os.urandom(32)
         room_keys[room_id] = {
             'key': initial_key,
             'version': 0
         }
         
-        print(f"[KEY_INIT] Created room {room_id} with deterministic key v0")
+        print(f"[KEY_INIT] Created room {room_id} with key v0")
         
         return True, room_id, f"Room '{name}' created"
-
-    def _derive_room_key(self, room_id: str, version: int) -> bytes:
-        """
-        Derive a deterministic key from room_id and version.
-        Same inputs always produce the same key.
-        """
-        import hashlib
-        
-        # Use HKDF-style derivation
-        material = f"{room_id}:v{version}:groupkey".encode()
-        
-        # Use multiple hash rounds for key stretching
-        key = hashlib.sha256(material).digest()
-        for _ in range(10000):  # 10k rounds
-            key = hashlib.sha256(key).digest()
-        
-        return key
-
+    
     def join_room(self, room_id: str, username: str, password: Optional[str] = None,
-                 invite_code: Optional[str] = None) -> Tuple[bool, Optional[str], str]:
+                invite_code: Optional[str] = None) -> Tuple[bool, Optional[str], str]:
         """
         Join a room with SIMPLIFIED access control
         """
@@ -101,19 +89,20 @@ class RoomManager:
         
         # Check if already a member
         current_role = db.get_member_role(room_id, username)
+        is_existing_member = current_role is not None
         
         # Check if room is full (only for new joins)
-        if not current_role:
+        if not is_existing_member:
             members = db.get_room_members(room_id)
             if len(members) >= room['max_members']:
                 return False, None, "Room is full"
         
-        # Verify access for private rooms
-        if room['type'] == 'private':
+        # Verify access for private rooms (only for NEW joins, not reconnects)
+        if room['type'] == 'private' and not is_existing_member:
             has_password = bool(room.get('password_hash'))
             has_invite = bool(room.get('invite_code'))
             
-            # MUST have invite code
+            # MUST have invite code for private rooms
             if has_invite:
                 if not invite_code or invite_code != room['invite_code']:
                     return False, None, "Invalid or missing invite code"
@@ -125,14 +114,17 @@ class RoomManager:
                 if not bcrypt.checkpw(password.encode(), room['password_hash'].encode()):
                     return False, None, "Incorrect password"
         
-        # Add or re-add user to room
-        if current_role:
-            success = db.add_member(room_id, username, current_role)
-        else:
+        # CRITICAL FIX: Only add to database if not already a member
+        # This prevents updating joined_at on reconnects
+        if not is_existing_member:
+            # First time joining - add with current timestamp
             success = db.add_member(room_id, username, 'member')
-        
-        if not success:
-            return False, None, "Failed to join room"
+            if not success:
+                return False, None, "Failed to join room"
+            message = f"Joined '{room['name']}'"
+        else:
+            # Already a member - just reconnecting, don't update database
+            message = f"Reconnected to '{room['name']}'"
         
         # Ensure room key exists
         if room_id not in room_keys:
@@ -143,8 +135,8 @@ class RoomManager:
                 'version': room.get('key_version', 0)
             }
         
-        return True, room_id, f"Joined '{room['name']}'"
-    
+        return True, room_id, message
+
     def leave_room(self, room_id: str, username: str) -> Tuple[bool, Optional[str], str]:
         """Leave a room"""
         role = db.get_member_role(room_id, username)
@@ -172,11 +164,12 @@ class RoomManager:
         return True, new_admin, "Left room"
     
     def kick_user(self, room_id: str, kicker_token: str, target_username: str) -> Tuple[bool, Optional[bytes], str]:
-        """Kick user from room and rotate key deterministically"""
+        """Kick user from room and rotate key"""
         kicker = self._get_username_from_token(kicker_token)
         if not kicker:
             return False, None, "Invalid session"
         
+        # Check if kicker is room admin or global admin
         is_room_admin = db.get_member_role(room_id, kicker) == 'admin'
         is_global = is_global_admin(kicker_token)
         
@@ -186,20 +179,20 @@ class RoomManager:
         if kicker == target_username:
             return False, None, "Cannot kick yourself"
         
+        # Remove member completely
         success = db.remove_member(room_id, target_username, wipe_history=True)
         if not success:
             return False, None, "User not in room"
         
-        # Get current version
+        # Ensure key exists before rotating
         if room_id not in room_keys:
-            _, current_version = self.get_room_key(room_id)
-        else:
-            current_version = room_keys[room_id]['version']
+            print(f"[KEY_ERROR] Cannot rotate key for {room_id} - key not found!")
+            return False, None, "Room key error"
         
-        new_version = current_version + 1
-        
-        # CRITICAL FIX: Generate deterministic new key
-        new_key = self._derive_room_key(room_id, new_version)
+        # Rotate room key
+        old_key = room_keys[room_id]['key']
+        new_version = room_keys[room_id]['version'] + 1
+        new_key = crypto.ratchet_key(old_key, version=new_version)
         
         room_keys[room_id] = {
             'key': new_key,
@@ -208,36 +201,33 @@ class RoomManager:
         
         db.update_room_key_version(room_id, new_version)
         
-        print(f"[KEY_ROTATE] Room {room_id} key rotated: v{current_version} → v{new_version} (deterministic)")
+        print(f"[KEY_ROTATE] Room {room_id} key rotated: v{new_version-1} → v{new_version}")
         
         return True, new_key, f"Kicked {target_username}, key rotated to v{new_version}"
-
+    
     def get_room_key(self, room_id: str) -> Tuple[Optional[bytes], int]:
-        """Get current room key - regenerate deterministically if not in memory"""
+        """Get current room key and version - MUST return same key for all users"""
         
-        # Check memory first
+        # Check if key already exists FIRST
         if room_id in room_keys:
             return room_keys[room_id]['key'], room_keys[room_id]['version']
         
-        # Not in memory - get version from database
+        # Key doesn't exist - check if room exists in database
         room = db.get_room(room_id)
         if not room:
             print(f"[KEY] Room {room_id} not found in database")
             return None, 0
         
-        version = room.get('key_version', 0)
-        
-        # CRITICAL FIX: Regenerate the SAME deterministic key
-        print(f"[KEY] Regenerating deterministic key v{version} for {room_id}")
-        key = self._derive_room_key(room_id, version)
-        
+        # Room exists but no key - generate new one
+        print(f"[KEY] Generating new key for existing room {room_id}")
+        new_key = os.urandom(32)
         room_keys[room_id] = {
-            'key': key,
-            'version': version
+            'key': new_key,
+            'version': room.get('key_version', 0)
         }
         
-        return key, version
-
+        return room_keys[room_id]['key'], room_keys[room_id]['version']
+       
     def delete_room(self, room_id: str, token: str) -> Tuple[bool, str]:
         """Delete a room (room admin or global admin)"""
         username = self._get_username_from_token(token)

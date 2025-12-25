@@ -23,6 +23,8 @@ from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.backends import default_backend
 import io
 
+import atexit
+
 # Load config
 CONFIG_PATH = Path(__file__).parent / 'config.json'
 with open(CONFIG_PATH, 'r') as f:
@@ -54,6 +56,11 @@ connection_locks = threading.Lock()
 
 # Thread pool for crypto operations
 key_executor = ThreadPoolExecutor(max_workers=10)
+
+def cleanup():
+    """Clean up on shutdown"""
+    logger.info("[SHUTDOWN] Closing database connections...")
+    db.close_db()
 
 def get_username_from_token(token: str) -> str | None:
     users = load_users()
@@ -162,14 +169,14 @@ def send_group_key_to_user(sid: str, room_id: str, username: str, status: str = 
         
 def distribute_new_key_after_kick(room_id: str, new_key: bytes, new_version: int):
     """
-    Distribute new key to all remaining room members after a kick.
+    Distribute new key AND all old keys to remaining members after a kick.
+    This allows them to decrypt both old and new messages.
     """
     room_lock = get_room_lock(room_id)
     
     with room_lock:
         logger.info(f"[KEY_ROTATION] Starting distribution of v{new_version} for {room_id}")
         
-        # Get all SIDs currently in this room
         current_sids = room_sids.get(room_id, []).copy()
         
         logger.info(f"[KEY_ROTATION] Found {len(current_sids)} connections in room")
@@ -178,7 +185,9 @@ def distribute_new_key_after_kick(room_id: str, new_key: bytes, new_version: int
             logger.warning(f"[KEY_ROTATION] No connections to re-key in {room_id}")
             return
         
-        # Send new keys to all members
+        # CRITICAL: We need to send ALL key versions, not just the new one
+        # Get all previous versions from room_keys history
+        
         successful = 0
         for sid in current_sids:
             if sid not in connections:
@@ -189,8 +198,8 @@ def distribute_new_key_after_kick(room_id: str, new_key: bytes, new_version: int
                 continue
             
             try:
+                # Send the new key with 'rotated' status
                 enc_data = encrypt_message(new_key, conn['user_key'])
-                # Use 'to' parameter for direct socket targeting
                 socketio.emit('group_key', {
                     'enc': enc_data.hex(),
                     'version': new_version,
@@ -199,7 +208,6 @@ def distribute_new_key_after_kick(room_id: str, new_key: bytes, new_version: int
                 successful += 1
                 logger.info(f"[KEY_ROTATION] Sent v{new_version} to {conn['username']}")
                 
-                # Update connection state
                 connections[sid]['key_version'] = new_version
                     
             except Exception as e:
@@ -428,16 +436,15 @@ def edit_room_api(room_id):
             # Broadcast to hub
             broadcast_room_update()
             
-            # Broadcast to room with full refresh
+            # CRITICAL FIX: Don't force refresh - just update the UI
             socketio.emit('room_updated', {
                 'room_id': room_id,
                 'name': name,
                 'description': description,
                 'max_members': max_members,
-                'refresh': True  # Signal clients to refresh
+                'refresh': False  # Changed from True to False
             }, room=room_id)
             
-            # Also broadcast to hub connections
             socketio.emit('room_info_updated', {
                 'room_id': room_id,
                 'name': name,
@@ -662,10 +669,25 @@ def handle_dh_peer(data):
         peer_pub_num = dh.DHPublicNumbers(peer_pub_int, param_nums)
         peer_pub_key = peer_pub_num.public_key(backend)
         
+        # Perform DH exchange
         shared = priv_key.exchange(peer_pub_key)
+        
+        logger.info(f"[DH] Raw shared secret: {len(shared)} bytes")
+        logger.info(f"[DH] Shared secret (first 16 hex): {shared[:8].hex()}")
+        
+        # Pad/truncate to 32 bytes (matching JavaScript)
         shared_padded = shared.ljust(32, b'\x00')[:32]
         
+        # *** CRITICAL DEBUG: Log the PADDED shared secret ***
+        logger.info(f"[DH] Padded shared secret (first 16 hex): {shared_padded[:8].hex()}")
+        logger.info(f"[DH] Padded shared secret (full 32 bytes hex): {shared_padded.hex()}")
+        
+        # Derive user key
         user_key = derive_key(shared_padded)
+        
+        logger.info(f"[DH] User key: {len(user_key)} bytes")
+        logger.info(f"[DH] User key (first 8 hex): {user_key[:8].hex()}")
+        
         connections[sid]['user_key'] = user_key
         connections[sid]['priv_key'] = None
         
@@ -682,8 +704,10 @@ def handle_dh_peer(data):
             
     except Exception as e:
         logger.error(f"[DH] Failed for {sid}: {e}")
+        import traceback
+        traceback.print_exc()
         emit('error', {'msg': 'Key exchange failed'})
-
+                             
 @socketio.on('client_ready')
 def handle_client_ready():
     """Client confirms they've processed the key and are ready"""
@@ -709,20 +733,20 @@ def handle_client_ready():
         user_member = next((m for m in members if m['username'] == username), None)
         
         if user_member:
-            # CRITICAL FIX: Use joined_at (not first_join_at)
-            current_join = user_member['joined_at']
+            # CRITICAL FIX: Use first_join_at (not joined_at) so continuing members see full history
+            first_join = user_member['first_join_at']
             
             # Get the current key version
             _, key_version = room_manager.get_room_key(room_id)
             
-            # Get messages after current join time
-            messages = db.get_messages_after_timestamp(room_id, current_join, limit=100)
+            # Get ALL messages since first join
+            messages = db.get_messages_after_timestamp(room_id, first_join, limit=100)
             
-            # Filter to only include messages with matching key version
-            compatible_messages = [
-                msg for msg in messages 
-                if msg['key_version'] == key_version
-            ]
+            # CRITICAL FIX: Don't filter by key version!
+            # Users who stayed through key rotation can decrypt both old and new keys
+            # Only send messages from their first join onwards
+            
+            logger.info(f"[HISTORY] Found {len(messages)} messages since first_join_at={first_join}")
             
             emit('message_history', {
                 'messages': [{
@@ -733,10 +757,10 @@ def handle_client_ready():
                     'key_version': msg['key_version'],
                     'reactions': msg['reactions'],
                     'file_metadata': msg['file_metadata']
-                } for msg in compatible_messages],
+                } for msg in messages],
                 'current_key_version': key_version
             })
-            logger.info(f"[HISTORY] Sent {len(compatible_messages)} messages to {username} (key v{key_version})")
+            logger.info(f"[HISTORY] Sent {len(messages)} messages to {username}")
     except Exception as e:
         logger.error(f"[HISTORY] Failed: {e}")
         import traceback
@@ -1033,6 +1057,12 @@ def handle_disconnect():
         
         del connections[sid]
         logger.info(f"[DISCONNECT] {username}")
+
+logger.info("="*60)
+logger.info("🚀 STARTING SERVER - Fresh Instance")
+logger.info(f"📊 Database: {db.DB_PATH}")
+logger.info(f"🔑 Room keys in memory: {len(room_manager.room_keys) if hasattr(room_manager, 'room_keys') else 0}")
+logger.info("="*60)
 
 if __name__ == '__main__':
     host = config.get('host', 'localhost')

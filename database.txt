@@ -201,46 +201,39 @@ def update_room_key_version(room_id: str, version: int):
 # ===== MEMBER OPERATIONS =====
 
 def add_member(room_id: str, username: str, role: str = 'member') -> bool:
-    """
-    Add user to room with smart timestamp handling:
-    - If user exists (reconnecting after temporary disconnect): Keep existing timestamps
-    - If user doesn't exist (new join or rejoin after kick): Set fresh timestamps
-    """
+    """Add user to room, preserving role and first_join_at if already member"""
     try:
         conn = get_db()
         cursor = conn.cursor()
         now = datetime.now().timestamp()
         
-        # Check if user is currently a member
+        # Check if user was previously a member
         cursor.execute('''
-            SELECT role, joined_at, first_join_at FROM room_members 
+            SELECT role, first_join_at FROM room_members 
             WHERE room_id = ? AND username = ?
         ''', (room_id, username))
         existing = cursor.fetchone()
         
         if existing:
-            # User is ALREADY a member - this is a RECONNECTION (page refresh, etc.)
-            # CRITICAL: Keep existing joined_at and first_join_at so they see full history
+            # Rejoining - preserve role and first_join_at
             cursor.execute('''
                 INSERT OR REPLACE INTO room_members 
                 (room_id, username, role, joined_at, first_join_at)
                 VALUES (?, ?, ?, ?, ?)
-            ''', (room_id, username, existing['role'], existing['joined_at'], existing['first_join_at']))
-            print(f"[DB] Reconnection: {username} preserved joined_at={existing['joined_at']}, first_join_at={existing['first_join_at']}")
+            ''', (room_id, username, existing['role'], now, existing['first_join_at']))
         else:
-            # New join (first time or after being kicked) - set both timestamps to now
+            # New join - use provided role and set both timestamps to now
             cursor.execute('''
                 INSERT INTO room_members (room_id, username, role, joined_at, first_join_at)
                 VALUES (?, ?, ?, ?, ?)
             ''', (room_id, username, role, now, now))
-            print(f"[DB] New join: {username} joined_at={now}")
         
         conn.commit()
         return True
     except Exception as e:
-        print(f"[DB] Error adding member: {e}")
+        print(f"Error adding member: {e}")
         return False
-                
+
 def remove_member(room_id: str, username: str, wipe_history: bool = False) -> bool:
     """Remove user from room"""
     try:

@@ -18,7 +18,6 @@ from werkzeug.utils import secure_filename
 from users import register, login, is_admin as is_global_admin, logout, load_users
 from rooms import room_manager
 import database as db
-import crypto
 from crypto import parameters, derive_key, encrypt_message
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.backends import default_backend
@@ -112,7 +111,7 @@ def get_room_lock(room_id: str):
 
 def send_group_key_to_user(sid: str, room_id: str, username: str, status: str = 'initial'):
     """
-    Send group key to a single user - BULLETPROOF VERSION with validation
+    Send group key to a single user with proper error handling and DEBUG logging.
     """
     if sid not in connections:
         logger.error(f"[KEY] Socket {sid} not found in connections")
@@ -133,43 +132,20 @@ def send_group_key_to_user(sid: str, room_id: str, username: str, status: str = 
                 logger.error(f"[KEY] No room key for {room_id}")
                 return False
             
-            # CRITICAL: Validate room key before use
-            if len(room_key) != 32:
-                logger.error(f"[KEY] Invalid room key length: {len(room_key)}")
-                return False
-            
-            # Log key info for debugging
+            # DEBUG: Log key info
             import hashlib
             key_hash = hashlib.sha256(room_key).hexdigest()[:16]
             logger.info(f"[KEY] Room {room_id} key hash: {key_hash}, version: {version}")
             
-            # Encrypt the room key using user's DH key
-            encrypted_bytes = crypto.encrypt_message(room_key, conn['user_key'])
+            # Encrypt the room key
+            enc_data = encrypt_message(room_key, conn['user_key'])
             
-            # CRITICAL: Validate encrypted output
-            if len(encrypted_bytes) < 32:
-                logger.error(f"[KEY] Encryption produced invalid output: {len(encrypted_bytes)} bytes")
-                return False
-            
-            logger.info(f"[KEY] Encrypted room key for {username}: {len(encrypted_bytes)} bytes")
-            
-            # TEST DECRYPTION LOCALLY BEFORE SENDING
-            try:
-                test_decrypt = crypto.decrypt_message(encrypted_bytes, conn['user_key'])
-                if test_decrypt != room_key:
-                    logger.error(f"[KEY] Local roundtrip failed for {username}!")
-                    return False
-                logger.info(f"[KEY] Local roundtrip verified for {username}")
-            except Exception as e:
-                logger.error(f"[KEY] Local roundtrip test failed: {e}")
-                return False
+            # DEBUG: Log encryption info
+            logger.info(f"[KEY] Encrypted room key for {username}: {len(enc_data)} bytes")
         
-        # Convert to hex for transmission
-        enc_hex = encrypted_bytes.hex()
-        
-        # Send via Socket.IO
+        # Send the encrypted key using 'to' parameter
         socketio.emit('group_key', {
-            'enc': enc_hex,
+            'enc': enc_data.hex(),
             'version': version,
             'status': status
         }, to=sid)
@@ -183,19 +159,14 @@ def send_group_key_to_user(sid: str, room_id: str, username: str, status: str = 
         import traceback
         traceback.print_exc()
         return False
-
+        
 def distribute_new_key_after_kick(room_id: str, new_key: bytes, new_version: int):
     """
-    Distribute new key to all remaining room members after a kick - BULLETPROOF VERSION
+    Distribute new key to all remaining room members after a kick.
     """
     room_lock = get_room_lock(room_id)
     
     with room_lock:
-        # CRITICAL: Validate new key before distribution
-        if len(new_key) != 32:
-            logger.error(f"[KEY_ROTATION] Invalid new key length: {len(new_key)}")
-            return
-        
         logger.info(f"[KEY_ROTATION] Starting distribution of v{new_version} for {room_id}")
         
         # Get all SIDs currently in this room
@@ -207,98 +178,72 @@ def distribute_new_key_after_kick(room_id: str, new_key: bytes, new_version: int
             logger.warning(f"[KEY_ROTATION] No connections to re-key in {room_id}")
             return
         
-        # Add delay to ensure kicked user is fully removed
-        import time
-        time.sleep(0.1)
-        
-        # Send new keys to all members with validation
+        # Send new keys to all members
         successful = 0
-        failed_users = []
-        
         for sid in current_sids:
             if sid not in connections:
                 continue
                 
             conn = connections[sid]
-            username = conn.get('username', 'unknown')
-            
             if not conn.get('user_key'):
-                logger.warning(f"[KEY_ROTATION] No user key for {username}, skipping")
                 continue
             
             try:
-                # Encrypt with validation
-                encrypted_bytes = crypto.encrypt_message(new_key, conn['user_key'])
-                
-                if len(encrypted_bytes) < 32:
-                    raise ValueError(f"Invalid encrypted output: {len(encrypted_bytes)} bytes")
-                
-                # Test local decryption
-                test_decrypt = crypto.decrypt_message(encrypted_bytes, conn['user_key'])
-                if test_decrypt != new_key:
-                    raise ValueError("Local roundtrip verification failed")
-                
-                # Send via Socket.IO
-                enc_hex = encrypted_bytes.hex()
+                enc_data = encrypt_message(new_key, conn['user_key'])
+                # Use 'to' parameter for direct socket targeting
                 socketio.emit('group_key', {
-                    'enc': enc_hex,
+                    'enc': enc_data.hex(),
                     'version': new_version,
                     'status': 'rotated'
                 }, to=sid)
-                
                 successful += 1
-                logger.info(f"[KEY_ROTATION] ✓ Sent v{new_version} to {username}")
+                logger.info(f"[KEY_ROTATION] Sent v{new_version} to {conn['username']}")
                 
                 # Update connection state
                 connections[sid]['key_version'] = new_version
                     
             except Exception as e:
-                logger.error(f"[KEY_ROTATION] Failed to send to {username}: {e}")
-                failed_users.append(username)
-        
-        if failed_users:
-            logger.error(f"[KEY_ROTATION] Failed users: {', '.join(failed_users)}")
+                logger.error(f"[KEY_ROTATION] Failed to send to {conn.get('username')}: {e}")
         
         logger.info(f"[KEY_ROTATION] Completed: {successful}/{len(current_sids)} successful")
 
 def check_connection_health():
     """Periodically check connection health and clean up stale connections"""
-    with app.app_context():
-        while True:
-            try:
-                current_time = time.time()
-                stale_sids = []
-                
-                for sid, conn in list(connections.items()):
-                    # If connection has been in non-ready state for too long, clean it up
-                    if not conn.get('ready') and current_time - conn.get('connect_time', current_time) > 30:
-                        stale_sids.append(sid)
-                        logger.warning(f"[HEALTH] Removing stale connection {sid} for {conn.get('username')}")
-                
-                for sid in stale_sids:
-                    if sid in connections:
-                        username = connections[sid].get('username')
-                        room_id = connections[sid].get('room_id')
-                        
-                        # Clean up connection
-                        if room_id:
-                            leave_room(room_id, sid)
-                            if room_id in room_sids and sid in room_sids[room_id]:
-                                room_sids[room_id].remove(sid)
-                        
-                        if username in active_sids:
-                            active_sids[username] = [s for s in active_sids[username] if s != sid]
-                            if not active_sids[username]:
-                                del active_sids[username]
-                        
-                        del connections[sid]
-                        
-                        logger.info(f"[HEALTH] Cleaned up stale connection for {username}")
+    while True:
+        try:
+            current_time = time.time()
+            stale_sids = []
             
-            except Exception as e:
-                logger.error(f"[HEALTH] Error in health check: {e}")
+            for sid, conn in list(connections.items()):
+                # If connection has been in non-ready state for too long, clean it up
+                if not conn.get('ready') and current_time - conn.get('connect_time', current_time) > 30:
+                    stale_sids.append(sid)
+                    logger.warning(f"[HEALTH] Removing stale connection {sid} for {conn.get('username')}")
             
-            time.sleep(30)
+            for sid in stale_sids:
+                if sid in connections:
+                    username = connections[sid].get('username')
+                    room_id = connections[sid].get('room_id')
+                    
+                    # Clean up connection
+                    if room_id:
+                        leave_room(room_id, sid)
+                        if room_id in room_sids and sid in room_sids[room_id]:
+                            room_sids[room_id].remove(sid)
+                    
+                    if username in active_sids:
+                        active_sids[username] = [s for s in active_sids[username] if s != sid]
+                        if not active_sids[username]:
+                            del active_sids[username]
+                    
+                    del connections[sid]
+                    
+                    logger.info(f"[HEALTH] Cleaned up stale connection for {username}")
+        
+        except Exception as e:
+            logger.error(f"[HEALTH] Error in health check: {e}")
+        
+        time.sleep(30)
 
 # Start health monitoring in background
 health_thread = threading.Thread(target=check_connection_health, daemon=True)
@@ -764,7 +709,8 @@ def handle_client_ready():
         user_member = next((m for m in members if m['username'] == username), None)
         
         if user_member:
-            # CRITICAL FIX: Use joined_at (not first_join_at)
+            # CRITICAL FIX: Use joined_at (current session) for security
+            # Users rejoining after kick should only see messages from this session
             current_join = user_member['joined_at']
             
             # Get the current key version
@@ -773,11 +719,14 @@ def handle_client_ready():
             # Get messages after current join time
             messages = db.get_messages_after_timestamp(room_id, current_join, limit=100)
             
-            # Filter to only include messages with matching key version
+            # CRITICAL: Only send messages encrypted with CURRENT key version
+            # Messages from before key rotation are intentionally undecryptable
             compatible_messages = [
                 msg for msg in messages 
                 if msg['key_version'] == key_version
             ]
+            
+            logger.info(f"[HISTORY] Found {len(messages)} total messages, {len(compatible_messages)} compatible with key v{key_version}")
             
             emit('message_history', {
                 'messages': [{
@@ -796,7 +745,7 @@ def handle_client_ready():
         logger.error(f"[HISTORY] Failed: {e}")
         import traceback
         traceback.print_exc()
-
+        
 @socketio.on('message')
 def handle_message(data):
     sid = request.sid
@@ -822,12 +771,6 @@ def handle_message(data):
         return
     
     try:
-        # CRITICAL: Validate encrypted message format
-        if len(enc_msg) < 64:  # IV(32 hex) + minimum ciphertext(32 hex)
-            emit('error', {'msg': 'Invalid encrypted message format'})
-            logger.error(f"[MSG] Invalid enc_msg length from {username}: {len(enc_msg)}")
-            return
-        
         # Get current room key with lock
         room_lock = get_room_lock(room_id)
         with room_lock:
@@ -836,17 +779,7 @@ def handle_message(data):
                 emit('error', {'msg': 'Room key not available'})
                 return
             
-            # OPTIONAL: Verify message can be decrypted (catches client-side encryption errors)
-            try:
-                enc_bytes = bytes.fromhex(enc_msg)
-                test_decrypt = crypto.decrypt_message(enc_bytes, room_key)
-                logger.info(f"[MSG] Verified message from {username} can be decrypted ({len(test_decrypt)} bytes)")
-            except Exception as e:
-                emit('error', {'msg': 'Message encryption validation failed'})
-                logger.error(f"[MSG] Server-side decrypt validation failed for {username}: {e}")
-                return
-            
-            # Save message to database
+            # Save message to database FIRST
             msg_id = db.save_message(room_id, username, enc_msg, key_version, file_metadata)
             
             # Create message payload
@@ -860,9 +793,10 @@ def handle_message(data):
                 'reactions': {}
             }
             
-            logger.info(f"[MSG] {username} sent message in {room_id} (id: {msg_id}, v{key_version}), broadcasting")
+            logger.info(f"[MSG] {username} sent message in {room_id} (id: {msg_id}), broadcasting to room")
             
-            # Broadcast to room
+            # THE FIX: Use emit with 'to' parameter for room broadcasting
+            # This broadcasts to ALL clients in the Socket.IO room
             emit('encrypted_msg', msg_payload, to=room_id, include_self=True, broadcast=True)
             
             logger.info(f"[MSG] ✓ Broadcasted message {msg_id} to all members in room {room_id}")
@@ -872,7 +806,7 @@ def handle_message(data):
         import traceback
         traceback.print_exc()
         emit('error', {'msg': 'Failed to send message'})
-        
+
 @socketio.on('load_more_messages')
 def handle_load_more(data):
     sid = request.sid

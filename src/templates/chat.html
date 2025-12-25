@@ -179,11 +179,11 @@
 
     let socket;
     let state = {
-      groupKey: null,
+      groupKeys: {},  // Store ALL keys: {version: CryptoJS.WordArray}
       userKey: null,
       priv: null,
       keyReady: false,
-      keyVersion: -1,
+      currentKeyVersion: -1,
       oldestMessageId: null,
       pendingFileMetadata: null,
       isUploading: false,
@@ -235,23 +235,23 @@
     }
 
     function reconnect() {
-      console.log('[RECONNECT] Attempting to reconnect...');
-      updateStatus('Reconnecting...', false);
-      
-      if (socket) {
-        socket.disconnect();
-      }
-      
-      state.groupKey = null;
-      state.userKey = null;
-      state.keyReady = false;
-      state.keyVersion = -1;
-      state.connectionAttempts = 0;
-      state.receivedMessageIds.clear();
-      state.isProcessingKeyRotation = false;
-      
-      initializeSocket();
-    }
+  console.log('[RECONNECT] Attempting to reconnect...');
+  updateStatus('Reconnecting...', false);
+  
+  if (socket) {
+    socket.disconnect();
+  }
+  
+  state.groupKeys = {};
+  state.userKey = null;
+  state.keyReady = false;
+  state.currentKeyVersion = -1;
+  state.connectionAttempts = 0;
+  state.receivedMessageIds.clear();
+  state.isProcessingKeyRotation = false;
+  
+  initializeSocket();
+}
 
     function initializeSocket() {
       state.connectionAttempts++;
@@ -302,191 +302,192 @@
       });
 
       socket.on('dh_pub', (data) => {
-  console.log('🔑 Received DH public key');
+      console.log('🔑 Received DH public key');
+      try {
+        const serverPub = BigInt('0x' + data.pub);
+        const shared = powMod(serverPub, state.priv, p);
+        
+        // Convert BigInt to hex (no leading zeros)
+        let sharedHex = shared.toString(16);
+        if (sharedHex.length % 2 !== 0) {
+          sharedHex = '0' + sharedHex;
+        }
+        
+        // Convert hex to byte array
+        const sharedBytes = [];
+        for (let i = 0; i < sharedHex.length; i += 2) {
+          sharedBytes.push(parseInt(sharedHex.substring(i, i + 2), 16));
+        }
+        
+        console.log(`🔑 DH shared secret: ${sharedBytes.length} bytes (raw)`);
+        
+        // Pad RIGHT to 32 bytes (matching Python's ljust)
+        const shared32 = new Uint8Array(32);
+        for (let i = 0; i < Math.min(sharedBytes.length, 32); i++) {
+          shared32[i] = sharedBytes[i];
+        }
+        
+        console.log(`🔑 DH shared secret: 32 bytes (padded/truncated)`);
+        
+        // ============ CRITICAL FIX ============
+        // Convert Uint8Array to hex string, then to CryptoJS WordArray
+        // This ensures proper byte-to-word conversion
+        const shared32Hex = Array.from(shared32)
+          .map(b => b.toString(16).padStart(2, '0'))
+          .join('');
+        
+        console.log(`🔑 Shared secret (first 16 hex): ${shared32Hex.substring(0, 32)}`);
+        
+        // Parse hex to WordArray (this is the CORRECT way)
+        const sharedWordArray = CryptoJS.enc.Hex.parse(shared32Hex);
+        
+        // Derive user key using PBKDF2
+        state.userKey = CryptoJS.PBKDF2(
+          sharedWordArray,
+          CryptoJS.enc.Utf8.parse(SALT),
+          { 
+            keySize: 8,  // 8 words = 32 bytes = 256 bits
+            iterations: ITERATIONS,
+            hasher: CryptoJS.algo.SHA256
+          }
+        );
+        
+        console.log(`🔑 User key derived: ${state.userKey.sigBytes} bytes`);
+        console.log(`🔑 User key (first 8 hex): ${CryptoJS.enc.Hex.stringify(state.userKey).substring(0, 16)}`);
+        
+        // Send our public key to server
+        const clientPub = powMod(g, state.priv, p);
+        const clientPubHex = clientPub.toString(16).padStart(HEX_LEN, '0');
+        socket.emit('dh_peer', { pub: clientPubHex });
+        updateStatus('Key exchange in progress...');
+        console.log('🔑 Sent DH peer key');
+      } catch (e) {
+        console.error('❌ DH error:', e);
+        console.error('Stack:', e.stack);
+        addMessage({ text: 'Key exchange failed', type: 'error' });
+        updateStatus('Key exchange failed', false, true);
+      }
+    });
+
+socket.on('group_key', (data) => {
+  console.log(`🔑 Received group key v${data.version}, status: ${data.status}`);
+  
+  if (!state.userKey) {
+    console.error('❌ User key not ready');
+    updateStatus('Key exchange incomplete', false, true);
+    return;
+  }
+  
   try {
-    // ============ CRITICAL FIX START ============
+    const encHex = data.enc;
+    console.log(`🔑 Encrypted key length: ${encHex.length} hex chars (${encHex.length/2} bytes)`);
     
-    // Server's public key
-    const serverPub = BigInt('0x' + data.pub);
+    const encBytes = CryptoJS.enc.Hex.parse(encHex);
+    console.log(`🔑 Encrypted bytes: ${encBytes.sigBytes} bytes`);
     
-    // Compute DH shared secret
-    const shared = powMod(serverPub, state.priv, p);
-    
-    // Convert BigInt to byte array (big-endian) - MUST MATCH PYTHON!
-    let sharedBytes = [];
-    let temp = shared;
-    
-    // Extract bytes from BigInt (big-endian order)
-    while (temp > 0n) {
-      sharedBytes.unshift(Number(temp & 0xFFn));
-      temp >>= 8n;
-    }
-    
-    // Python does: shared.ljust(32, b'\x00')[:32]
-    // Meaning: pad to 32 bytes with zeros at END, then take first 32
-    while (sharedBytes.length < 32) {
-      sharedBytes.push(0);  // Pad at end
-    }
-    if (sharedBytes.length > 32) {
-      sharedBytes = sharedBytes.slice(0, 32);  // Truncate to 32
-    }
-    
-    console.log(`🔑 DH shared secret: ${sharedBytes.length} bytes`);
-    
-    // Create CryptoJS WordArray from exactly 32 bytes
-    const sharedWordArray = CryptoJS.lib.WordArray.create(sharedBytes);
-    
-    // Derive user key - now matches Python's derive_key()
-    state.userKey = CryptoJS.PBKDF2(
-      sharedWordArray,
-      CryptoJS.enc.Utf8.parse(SALT),
-      { keySize: 8, iterations: ITERATIONS }
+    const iv = CryptoJS.lib.WordArray.create(encBytes.words.slice(0, 4), 16);
+    const ciphertext = CryptoJS.lib.WordArray.create(
+      encBytes.words.slice(4), 
+      encBytes.sigBytes - 16
     );
     
-    // ============ CRITICAL FIX END ============
+    console.log(`🔑 IV: ${iv.sigBytes} bytes, Ciphertext: ${ciphertext.sigBytes} bytes`);
     
-    console.log(`🔑 User key derived: ${state.userKey.sigBytes} bytes`);
+    const decrypted = CryptoJS.AES.decrypt(
+      { ciphertext: ciphertext },
+      state.userKey,
+      { 
+        iv: iv, 
+        mode: CryptoJS.mode.CBC, 
+        padding: CryptoJS.pad.Pkcs7 
+      }
+    );
     
-    // Send our public key to server
-    const clientPub = powMod(g, state.priv, p);
-    const clientPubHex = clientPub.toString(16).padStart(HEX_LEN, '0');
-    socket.emit('dh_peer', { pub: clientPubHex });
-    updateStatus('Key exchange in progress...');
-    console.log('🔑 Sent DH peer key');
+    if (!decrypted || decrypted.sigBytes === 0) {
+      throw new Error('Decryption resulted in empty key');
+    }
+    
+    console.log(`🔑 Decrypted group key: ${decrypted.sigBytes} bytes`);
+    
+    // CRITICAL FIX: Store this key version
+    state.groupKeys[data.version] = decrypted;
+    state.currentKeyVersion = data.version;
+    
+    console.log(`🔑 Stored key v${data.version}, now have versions: ${Object.keys(state.groupKeys).join(', ')}`);
+    
+    if (data.status === 'rotated') {
+      console.log(`🔄 Key rotation complete to v${data.version}`);
+      
+      state.isProcessingKeyRotation = false;
+      state.keyReady = true;
+      
+      updateStatus(`Ready - Encrypted Chat (v${data.version})`, true);
+      
+      addMessage({ 
+        text: `🔑 Security key updated to v${data.version}. You can now chat securely.`, 
+        type: 'sys', 
+        timestamp: Date.now() / 1000 
+      });
+      
+      console.log(`✅ Ready with v${data.version}`);
+      
+    } else {
+      console.log(`✅ Initial key v${data.version} received`);
+      state.keyReady = true;
+      updateStatus(`Ready - Encrypted Chat (v${data.version})`, true);
+      
+      setTimeout(() => {
+        console.log('📢 Notifying server client is ready');
+        socket.emit('client_ready');
+      }, 100);
+    }
+    
   } catch (e) {
-    console.error('❌ DH error:', e);
-    addMessage({ text: 'Key exchange failed', type: 'error' });
-    updateStatus('Key exchange failed', false, true);
+    console.error('❌ Key decryption error:', e);
+    addMessage({ 
+      text: '❌ Key decryption failed. Please refresh the page.', 
+      type: 'error', 
+      timestamp: Date.now() / 1000 
+    });
+    updateStatus('Key decryption failed', false, true);
   }
 });
 
-      socket.on('group_key', (data) => {
-        console.log(`🔑 Received group key v${data.version}, status: ${data.status}`);
-        
-        if (!state.userKey) {
-          console.error('❌ User key not ready');
-          updateStatus('Key exchange incomplete', false, true);
-          return;
-        }
-        
-        try {
-          // Parse the hex-encoded encrypted data
-          const encHex = data.enc;
-          console.log(`🔑 Encrypted key length: ${encHex.length} hex chars`);
-          
-          // Convert hex to WordArray
-          const encBytes = CryptoJS.enc.Hex.parse(encHex);
-          console.log(`🔑 Encrypted bytes: ${encBytes.sigBytes} bytes`);
-          
-          // First 16 bytes are the IV
-          const iv = CryptoJS.lib.WordArray.create(encBytes.words.slice(0, 4), 16);
-          
-          // Rest is the ciphertext
-          const ciphertext = CryptoJS.lib.WordArray.create(
-            encBytes.words.slice(4), 
-            encBytes.sigBytes - 16
-          );
-          
-          console.log(`🔑 IV: ${iv.sigBytes} bytes, Ciphertext: ${ciphertext.sigBytes} bytes`);
-          
-          // Decrypt using AES-256-CBC
-          const decrypted = CryptoJS.AES.decrypt(
-            { ciphertext: ciphertext },
-            state.userKey,
-            { 
-              iv: iv, 
-              mode: CryptoJS.mode.CBC, 
-              padding: CryptoJS.pad.Pkcs7 
-            }
-          );
-          
-          // Verify decryption worked
-          if (!decrypted || decrypted.sigBytes === 0) {
-            throw new Error('Decryption resulted in empty key');
-          }
-          
-          console.log(`🔑 Decrypted group key: ${decrypted.sigBytes} bytes`);
-          
-          // Update state
-          const oldVersion = state.keyVersion;
-          state.groupKey = decrypted;
-          state.keyVersion = data.version || 0;
-          
-          console.log(`🔑 Key updated from v${oldVersion} to v${state.keyVersion}`);
-          
-          if (data.status === 'rotated') {
-            console.log(`🔄 Key rotation complete to v${state.keyVersion}`);
-            
-            state.isProcessingKeyRotation = false;
-            state.keyReady = true;
-            
-            updateStatus(`Ready - Encrypted Chat (v${state.keyVersion})`, true);
-            
-            addMessage({ 
-              text: `🔑 Security key updated to v${state.keyVersion}. You can now chat securely.`, 
-              type: 'sys', 
-              timestamp: Date.now() / 1000 
-            });
-            
-            console.log(`✅ Ready with v${state.keyVersion}`);
-            
-          } else {
-            console.log(`✅ Initial key v${state.keyVersion} received`);
-            state.keyReady = true;
-            updateStatus(`Ready - Encrypted Chat (v${state.keyVersion})`, true);
-            
-            setTimeout(() => {
-              console.log('📢 Notifying server client is ready');
-              socket.emit('client_ready');
-            }, 100);
-          }
-          
-        } catch (e) {
-          console.error('❌ Key decryption error:', e);
-          console.error('Stack:', e.stack);
-          addMessage({ 
-            text: '❌ Key decryption failed. Please refresh the page.', 
-            type: 'error', 
-            timestamp: Date.now() / 1000 
-          });
-          updateStatus('Key decryption failed', false, true);
-        }
-      });
-
-      socket.on('message_history', (data) => {
-        console.log(`📜 Received ${data.messages?.length || 0} history messages`);
-        if (!data.messages || !data.messages.length) return;
-        
-        data.messages.forEach((msg, idx) => {
-          if (state.receivedMessageIds.has(msg.id)) {
-            return;
-          }
-          
-          try {
-            const text = safeDecrypt(msg.enc, state.groupKey);
-            addMessage({
-              id: msg.id,
-              sender: msg.sender,
-              text: text,
-              timestamp: msg.timestamp,
-              reactions: msg.reactions || {},
-              file_metadata: msg.file_metadata
-            }, idx < data.messages.length - 5);
-            
-            state.receivedMessageIds.add(msg.id);
-            
-            if (!state.oldestMessageId || msg.id < state.oldestMessageId) {
-              state.oldestMessageId = msg.id;
-            }
-          } catch (e) {
-            console.error('❌ History decrypt error for msg', msg.id, e);
-          }
-        });
-        
-        if (data.messages.length >= 50) {
-          document.getElementById('loadMore').style.display = 'block';
-        }
-      });
+socket.on('message_history', (data) => {
+  console.log(`📜 Received ${data.messages?.length || 0} history messages`);
+  if (!data.messages || !data.messages.length) return;
+  
+  data.messages.forEach((msg, idx) => {
+    if (state.receivedMessageIds.has(msg.id)) {
+      return;
+    }
+    
+    try {
+      // CRITICAL FIX: Pass key version to decrypt function
+      const text = safeDecrypt(msg.enc, msg.key_version);
+      addMessage({
+        id: msg.id,
+        sender: msg.sender,
+        text: text,
+        timestamp: msg.timestamp,
+        reactions: msg.reactions || {},
+        file_metadata: msg.file_metadata
+      }, idx < data.messages.length - 5);
+      
+      state.receivedMessageIds.add(msg.id);
+      
+      if (!state.oldestMessageId || msg.id < state.oldestMessageId) {
+        state.oldestMessageId = msg.id;
+      }
+    } catch (e) {
+      console.error(`❌ History decrypt error for msg ${msg.id} (key v${msg.key_version}):`, e.message);
+    }
+  });
+  
+  if (data.messages.length >= 50) {
+    document.getElementById('loadMore').style.display = 'block';
+  }
+});
 
       socket.on('more_messages', (data) => {
         if (!data.messages || !data.messages.length) {
@@ -569,47 +570,48 @@
       });
 
       socket.on('encrypted_msg', (data) => {
-        console.log(`📨 Incoming from ${data.sender}, msg v${data.key_version}, our v${state.keyVersion}`);
-        
-        if (state.receivedMessageIds.has(data.id)) {
-          console.log(`⏭️ Duplicate ${data.id}`);
-          return;
-        }
-        
-        if (!state.keyReady || !state.groupKey) {
-          console.log(`⏳ Not ready, ${data.id} in history later`);
-          return;
-        }
-        
-        try {
-          const text = safeDecrypt(data.enc, state.groupKey);
-          console.log(`✅ Decrypted from ${data.sender}`);
-          
-          addMessage({
-            id: data.id,
-            sender: data.sender,
-            text: text,
-            timestamp: data.timestamp,
-            reactions: data.reactions || {},
-            file_metadata: data.file_metadata
-          });
-          
-          state.receivedMessageIds.add(data.id);
-        } catch (e) {
-          console.error(`❌ Decrypt fail ${data.id}:`, e);
-          
-          addMessage({
-            id: data.id,
-            sender: data.sender,
-            text: `[Decryption error: msg v${data.key_version}, you have v${state.keyVersion}]`,
-            timestamp: data.timestamp,
-            reactions: {},
-            type: 'error'
-          });
-          
-          state.receivedMessageIds.add(data.id);
-        }
-      });
+  console.log(`📨 Incoming from ${data.sender}, msg v${data.key_version}, our v${state.currentKeyVersion}`);
+  
+  if (state.receivedMessageIds.has(data.id)) {
+    console.log(`⏭️ Duplicate ${data.id}`);
+    return;
+  }
+  
+  if (!state.keyReady || Object.keys(state.groupKeys).length === 0) {
+    console.log(`⏳ Not ready, ${data.id} will be in history later`);
+    return;
+  }
+  
+  try {
+    // CRITICAL FIX: Pass key version
+    const text = safeDecrypt(data.enc, data.key_version);
+    console.log(`✅ Decrypted from ${data.sender}`);
+    
+    addMessage({
+      id: data.id,
+      sender: data.sender,
+      text: text,
+      timestamp: data.timestamp,
+      reactions: data.reactions || {},
+      file_metadata: data.file_metadata
+    });
+    
+    state.receivedMessageIds.add(data.id);
+  } catch (e) {
+    console.error(`❌ Decrypt fail ${data.id}:`, e.message);
+    
+    addMessage({
+      id: data.id,
+      sender: data.sender,
+      text: `[Decryption error: msg v${data.key_version}, you have keys: ${Object.keys(state.groupKeys).join(', ')}]`,
+      timestamp: data.timestamp,
+      reactions: {},
+      type: 'error'
+    });
+    
+    state.receivedMessageIds.add(data.id);
+  }
+});
 
       socket.on('message_deleted', (data) => {
         const msgEl = messageElements[data.message_id];
@@ -698,11 +700,12 @@
             timestamp: Date.now() / 1000
           });
           
-          if (data.refresh) {
-            setTimeout(() => {
-              window.location.reload();
-            }, 2000);
-          }
+        // CRITICAL FIX: Don't refresh the page
+        // if (data.refresh) {
+        //   setTimeout(() => {
+        //     window.location.reload();
+        //   }, 2000);
+        // }
         }
       });
     }
@@ -821,61 +824,75 @@
       return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     }
 
-     function safeDecrypt(encHex, key) {
-      try {
-        if (!encHex || encHex.length < 32) {
-          throw new Error('Encrypted data too short or empty');
-        }
-        
-        if (!key || key.sigBytes === 0) {
-          throw new Error('Invalid decryption key');
-        }
-        
-        // Parse hex to bytes
-        const allBytes = CryptoJS.enc.Hex.parse(encHex);
-        
-        if (allBytes.sigBytes < 32) {
-          throw new Error('Encrypted data too short (need at least 32 bytes)');
-        }
-        
-        // Extract IV (first 16 bytes)
-        const iv = CryptoJS.lib.WordArray.create(allBytes.words.slice(0, 4), 16);
-        
-        // Extract ciphertext (everything after first 16 bytes)
-        const ciphertextWords = allBytes.words.slice(4);
-        const ciphertextBytes = allBytes.sigBytes - 16;
-        const ciphertext = CryptoJS.lib.WordArray.create(ciphertextWords, ciphertextBytes);
-        
-        // Decrypt
-        const decrypted = CryptoJS.AES.decrypt(
-          { ciphertext: ciphertext },
-          key,
-          { 
-            iv: iv, 
-            mode: CryptoJS.mode.CBC, 
-            padding: CryptoJS.pad.Pkcs7 
-          }
-        );
-        
-        // Convert to UTF-8 text
-        const text = decrypted.toString(CryptoJS.enc.Utf8);
-        
-        if (!text || text.length === 0) {
-          throw new Error('Decryption resulted in empty text');
-        }
-        
-        return text;
-        
-      } catch (e) {
-        console.error('❌ Decrypt error details:', {
-          error: e.message,
-          encHexLength: encHex ? encHex.length : 0,
-          keyValid: !!(key && key.sigBytes > 0)
-        });
-        throw new Error(`Decryption failed: ${e.message}`);
+    function safeDecrypt(encHex, msgKeyVersion) {
+  try {
+    if (!encHex || encHex.length < 32) {
+      throw new Error('Encrypted data too short or empty');
+    }
+    
+    // CRITICAL FIX: Try to decrypt with the message's key version
+    let key = state.groupKeys[msgKeyVersion];
+    
+    // If we don't have that specific version, try current key
+    if (!key) {
+      console.warn(`⚠️ Don't have key v${msgKeyVersion}, trying current v${state.currentKeyVersion}`);
+      key = state.groupKeys[state.currentKeyVersion];
+    }
+    
+    // If still no key, try any available key
+    if (!key) {
+      const availableVersions = Object.keys(state.groupKeys);
+      if (availableVersions.length > 0) {
+        const fallbackVersion = availableVersions[availableVersions.length - 1];
+        console.warn(`⚠️ Using fallback key v${fallbackVersion}`);
+        key = state.groupKeys[fallbackVersion];
       }
     }
     
+    if (!key || key.sigBytes === 0) {
+      throw new Error(`No valid key available (needed v${msgKeyVersion}, have: ${Object.keys(state.groupKeys).join(', ')})`);
+    }
+    
+    const allBytes = CryptoJS.enc.Hex.parse(encHex);
+    
+    if (allBytes.sigBytes < 32) {
+      throw new Error('Encrypted data too short (need at least 32 bytes)');
+    }
+    
+    const iv = CryptoJS.lib.WordArray.create(allBytes.words.slice(0, 4), 16);
+    const ciphertextWords = allBytes.words.slice(4);
+    const ciphertextBytes = allBytes.sigBytes - 16;
+    const ciphertext = CryptoJS.lib.WordArray.create(ciphertextWords, ciphertextBytes);
+    
+    const decrypted = CryptoJS.AES.decrypt(
+      { ciphertext: ciphertext },
+      key,
+      { 
+        iv: iv, 
+        mode: CryptoJS.mode.CBC, 
+        padding: CryptoJS.pad.Pkcs7 
+      }
+    );
+    
+    const text = decrypted.toString(CryptoJS.enc.Utf8);
+    
+    if (!text || text.length === 0) {
+      throw new Error('Decryption resulted in empty text');
+    }
+    
+    return text;
+    
+  } catch (e) {
+    console.error('❌ Decrypt error details:', {
+      error: e.message,
+      msgKeyVersion: msgKeyVersion,
+      availableKeys: Object.keys(state.groupKeys).join(', '),
+      encHexLength: encHex ? encHex.length : 0
+    });
+    throw new Error(`Decryption failed: ${e.message}`);
+  }
+}
+
     function safeEncrypt(text, key) {
       try {
         if (!text || text.length === 0) {
@@ -938,59 +955,89 @@
     });
 
     function sendMessage() {
-      const input = document.getElementById('msg-input');
-      const msg = input.value.trim();
-      
-      if (!msg && !state.pendingFileMetadata) return;
-      
-      if (!socket || !socket.connected) {
-        addMessage({
-          text: '⚠️ Not connected to server. Please wait...',
-          type: 'error',
-          timestamp: Date.now() / 1000
-        });
-        reconnect();
-        return;
-      }
-      
-      if (!state.keyReady || !state.groupKey) {
-        addMessage({
-          text: '⚠️ Encryption key not ready yet. Please wait...',
-          type: 'error',
-          timestamp: Date.now() / 1000
-        });
-        return;
-      }
-      
-      if (state.isUploading) {
-        alert('Please wait for file upload to complete');
-        return;
-      }
-      
-      try {
-        const displayText = msg || (state.pendingFileMetadata ? state.pendingFileMetadata.filename : '[File]');
-        
-        // Use the bulletproof encrypt function
-        const encryptedHex = safeEncrypt(displayText, state.groupKey);
-        
-        console.log(`📤 Sending message (${displayText.length} chars, ${encryptedHex.length} hex), key v${state.keyVersion}`);
-        
-        socket.emit('message', {
-          enc: encryptedHex,
-          file_metadata: state.pendingFileMetadata
-        });
-        
-        input.value = '';
-        input.style.height = 'auto';
-        clearFileAttachment();
-        input.focus();
-        
-      } catch (e) {
-        console.error('❌ Encrypt error:', e);
-        alert('Failed to send message: ' + e.message);
-      }
+  const input = document.getElementById('msg-input');
+  const msg = input.value.trim();
+  
+  if (!msg && !state.pendingFileMetadata) return;
+  
+  if (!socket || !socket.connected) {
+    console.error('❌ Cannot send: Socket not connected');
+    addMessage({
+      text: '⚠️ Not connected to server. Reconnecting...',
+      type: 'error',
+      timestamp: Date.now() / 1000
+    });
+    reconnect();
+    return;
+  }
+  
+  if (!state.userKey) {
+    console.error('❌ Cannot send: No user key');
+    addMessage({
+      text: '⚠️ Encryption not initialized. Please wait or refresh.',
+      type: 'error',
+      timestamp: Date.now() / 1000
+    });
+    return;
+  }
+  
+  if (!state.keyReady || Object.keys(state.groupKeys).length === 0) {
+    console.error('❌ Cannot send: No group keys');
+    addMessage({
+      text: '⚠️ Encryption key not ready yet. Please wait...',
+      type: 'error',
+      timestamp: Date.now() / 1000
+    });
+    return;
+  }
+  
+  if (state.isUploading) {
+    alert('Please wait for file upload to complete');
+    return;
+  }
+  
+  if (state.isProcessingKeyRotation) {
+    console.warn('⚠️ Key rotation in progress, delaying send');
+    addMessage({
+      text: '⚠️ Key rotation in progress. Please wait...',
+      type: 'error',
+      timestamp: Date.now() / 1000
+    });
+    return;
+  }
+  
+  try {
+    const displayText = msg || (state.pendingFileMetadata ? state.pendingFileMetadata.filename : '[File]');
+    
+    // CRITICAL FIX: Use current key version
+    const currentKey = state.groupKeys[state.currentKeyVersion];
+    
+    if (!currentKey || currentKey.sigBytes === 0) {
+      throw new Error('Invalid current group key');
     }
     
+    console.log(`📤 Encrypting message (${displayText.length} chars) with key v${state.currentKeyVersion}`);
+    
+    const encryptedHex = safeEncrypt(displayText, currentKey);
+    
+    console.log(`📤 Sending message (${displayText.length} chars, ${encryptedHex.length} hex chars), key v${state.currentKeyVersion}`);
+    
+    socket.emit('message', {
+      enc: encryptedHex,
+      file_metadata: state.pendingFileMetadata
+    });
+    
+    input.value = '';
+    input.style.height = 'auto';
+    clearFileAttachment();
+    input.focus();
+    
+  } catch (e) {
+    console.error('❌ Encrypt error:', e);
+    alert('Failed to send message: ' + e.message);
+  }
+}
+
     function clearFileAttachment() {
       state.pendingFileMetadata = null;
       document.getElementById('filePreviewContainer').innerHTML = '';
