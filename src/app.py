@@ -678,7 +678,6 @@ def handle_dh_peer(data):
         # Pad/truncate to 32 bytes (matching JavaScript)
         shared_padded = shared.ljust(32, b'\x00')[:32]
         
-        # *** CRITICAL DEBUG: Log the PADDED shared secret ***
         logger.info(f"[DH] Padded shared secret (first 16 hex): {shared_padded[:8].hex()}")
         logger.info(f"[DH] Padded shared secret (full 32 bytes hex): {shared_padded.hex()}")
         
@@ -686,7 +685,11 @@ def handle_dh_peer(data):
         user_key = derive_key(shared_padded)
         
         logger.info(f"[DH] User key: {len(user_key)} bytes")
-        logger.info(f"[DH] User key (first 8 hex): {user_key[:8].hex()}")
+        logger.info(f"[DH] User key (first 16 hex): {user_key[:8].hex()}")  # Changed from 8 to 16 hex chars
+        
+        # Validate key
+        if len(user_key) != 32:
+            raise ValueError(f'Invalid user key length: {len(user_key)}')
         
         connections[sid]['user_key'] = user_key
         connections[sid]['priv_key'] = None
@@ -706,8 +709,8 @@ def handle_dh_peer(data):
         logger.error(f"[DH] Failed for {sid}: {e}")
         import traceback
         traceback.print_exc()
-        emit('error', {'msg': 'Key exchange failed'})
-                             
+        emit('error', {'msg': f'Key exchange failed: {str(e)}'})
+                                    
 @socketio.on('client_ready')
 def handle_client_ready():
     """Client confirms they've processed the key and are ready"""

@@ -170,8 +170,8 @@
     const USERNAME = '{{ username }}';
     const ROOM_ROLE = '{{ room_role }}';
     const IS_GLOBAL_ADMIN = {{ is_global_admin|tojson }};
-    const SALT = '{{ salt | tojson | safe }}';
-    const ITERATIONS = {{ iterations | tojson }};
+    const SALT = '{{ salt }}';
+    const ITERATIONS = {{ iterations }};
 
     const g = 2n;
     const p = 0xB6F676C1440DBDAF286A55D9CC2826E67355B077EB15D49D93981E685852282B1A5F15B9C4FD15C0A17A234DC414B46868A785CDDB55DA662DD64BFAF7E32D33D28273DA1CEBAC9CF2BD720E492FCF01AD3AC4A2B04843FA7DDF8279C7459F7AC078E87282D7B417D478466809EE2981E32681A792F6C2454FA62DA4CB2498C7n;
@@ -305,10 +305,18 @@
       console.log('🔑 Received DH public key');
       try {
         const serverPub = BigInt('0x' + data.pub);
+        
+        // Validate server public key
+        if (serverPub <= 1n || serverPub >= p) {
+          throw new Error('Invalid server public key');
+        }
+        
         const shared = powMod(serverPub, state.priv, p);
         
-        // Convert BigInt to hex (no leading zeros)
+        // Convert BigInt to hex
         let sharedHex = shared.toString(16);
+        
+        // Ensure even length
         if (sharedHex.length % 2 !== 0) {
           sharedHex = '0' + sharedHex;
         }
@@ -321,24 +329,24 @@
         
         console.log(`🔑 DH shared secret: ${sharedBytes.length} bytes (raw)`);
         
-        // Pad RIGHT to 32 bytes (matching Python's ljust)
+        // Pad to exactly 32 bytes (matching Python's ljust)
         const shared32 = new Uint8Array(32);
         for (let i = 0; i < Math.min(sharedBytes.length, 32); i++) {
           shared32[i] = sharedBytes[i];
         }
+        // Remaining bytes are already 0 (Uint8Array initializes to 0)
         
         console.log(`🔑 DH shared secret: 32 bytes (padded/truncated)`);
         
-        // ============ CRITICAL FIX ============
-        // Convert Uint8Array to hex string, then to CryptoJS WordArray
-        // This ensures proper byte-to-word conversion
+        // Convert to hex for logging
         const shared32Hex = Array.from(shared32)
           .map(b => b.toString(16).padStart(2, '0'))
           .join('');
         
         console.log(`🔑 Shared secret (first 16 hex): ${shared32Hex.substring(0, 32)}`);
+        console.log(`🔑 Shared secret (full 32 bytes): ${shared32Hex}`); // NEW: Full hex for debugging
         
-        // Parse hex to WordArray (this is the CORRECT way)
+        // Parse hex to WordArray
         const sharedWordArray = CryptoJS.enc.Hex.parse(shared32Hex);
         
         // Derive user key using PBKDF2
@@ -353,7 +361,12 @@
         );
         
         console.log(`🔑 User key derived: ${state.userKey.sigBytes} bytes`);
-        console.log(`🔑 User key (first 8 hex): ${CryptoJS.enc.Hex.stringify(state.userKey).substring(0, 16)}`);
+        console.log(`🔑 User key (first 16 hex): ${CryptoJS.enc.Hex.stringify(state.userKey).substring(0, 32)}`); // NEW: Show more for comparison
+        
+        // Validate user key
+        if (!state.userKey || state.userKey.sigBytes !== 32) {
+          throw new Error('User key derivation failed');
+        }
         
         // Send our public key to server
         const clientPub = powMod(g, state.priv, p);
@@ -364,11 +377,11 @@
       } catch (e) {
         console.error('❌ DH error:', e);
         console.error('Stack:', e.stack);
-        addMessage({ text: 'Key exchange failed', type: 'error' });
+        addMessage({ text: 'Key exchange failed: ' + e.message, type: 'error' });
         updateStatus('Key exchange failed', false, true);
       }
     });
-
+    
 socket.on('group_key', (data) => {
   console.log(`🔑 Received group key v${data.version}, status: ${data.status}`);
   
