@@ -118,7 +118,8 @@ def get_room_lock(room_id: str):
 
 def send_group_key_to_user(sid: str, room_id: str, username: str, status: str = 'initial'):
     """
-    Send group key to a single user with proper error handling and DEBUG logging.
+    Send group key(s) to a single user with historical key support.
+    For reconnecting users, sends ALL needed key versions.
     """
     if sid not in connections:
         logger.error(f"[KEY] Socket {sid} not found in connections")
@@ -131,42 +132,78 @@ def send_group_key_to_user(sid: str, room_id: str, username: str, status: str = 
         return False
     
     try:
-        # Get current room key with lock
+        # Get current room key
         room_lock = get_room_lock(room_id)
         with room_lock:
-            room_key, version = room_manager.get_room_key(room_id)
-            if not room_key:
+            current_key, current_version = room_manager.get_room_key(room_id)
+            if not current_key:
                 logger.error(f"[KEY] No room key for {room_id}")
                 return False
             
-            # DEBUG: Log key info
-            import hashlib
-            key_hash = hashlib.sha256(room_key).hexdigest()[:16]
-            logger.info(f"[KEY] Room {room_id} key hash: {key_hash}, version: {version}")
+            # Check if user needs historical keys (reconnection after key rotation)
+            members = db.get_room_members(room_id)
+            user_member = next((m for m in members if m['username'] == username), None)
             
-            # Encrypt the room key
-            enc_data = encrypt_message(room_key, conn['user_key'])
+            needed_versions = set()
             
-            # DEBUG: Log encryption info
-            logger.info(f"[KEY] Encrypted room key for {username}: {len(enc_data)} bytes")
-        
-        # Send the encrypted key using 'to' parameter
-        socketio.emit('group_key', {
-            'enc': enc_data.hex(),
-            'version': version,
-            'status': status
-        }, to=sid)
-        
-        logger.info(f"[KEY] ✓ Sent v{version} ({status}) to {username} in {room_id}")
-        
-        return True
+            if user_member and status == 'initial':
+                # Get all messages since user's first join to find needed key versions
+                first_join = user_member['first_join_at']
+                messages = db.get_messages_after_timestamp(room_id, first_join, limit=1000)
+                
+                for msg in messages:
+                    needed_versions.add(msg['key_version'])
+                
+                # Also include current version
+                needed_versions.add(current_version)
+                
+                logger.info(f"[KEY] {username} needs key versions: {sorted(needed_versions)} for history since {first_join}")
+            else:
+                # New join or key rotation - just send current key
+                needed_versions.add(current_version)
+            
+            # Send all needed keys
+            keys_to_send = sorted(needed_versions)
+            
+            for idx, version in enumerate(keys_to_send):
+                # Regenerate historical key deterministically
+                key_to_send = room_manager._derive_room_key(room_id, version)
+                
+                # Encrypt with user's key
+                enc_data = encrypt_message(key_to_send, conn['user_key'])
+                
+                # Determine status for this key
+                is_last = (idx == len(keys_to_send) - 1)
+                
+                if len(keys_to_send) == 1:
+                    # Only one key - use the original status
+                    key_status = status
+                elif is_last:
+                    # Last key in batch - use 'initial' so client becomes ready
+                    key_status = 'initial'
+                else:
+                    # Historical key - client will store but not become ready yet
+                    key_status = 'historical'
+                
+                # Send this key version
+                socketio.emit('group_key', {
+                    'enc': enc_data.hex(),
+                    'version': version,
+                    'status': key_status,
+                    'total_keys': len(keys_to_send),  # NEW: Tell client how many keys to expect
+                    'key_index': idx + 1  # NEW: Tell client which key this is (1-based)
+                }, to=sid)
+                
+                logger.info(f"[KEY] ✓ Sent v{version} ({key_status}) to {username} [{idx+1}/{len(keys_to_send)}]")
+            
+            return True
         
     except Exception as e:
         logger.error(f"[KEY] Failed to send key to {username}: {e}")
         import traceback
         traceback.print_exc()
         return False
-        
+                
 def distribute_new_key_after_kick(room_id: str, new_key: bytes, new_version: int):
     """
     Distribute new key AND all old keys to remaining members after a kick.

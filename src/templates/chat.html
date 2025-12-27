@@ -382,8 +382,8 @@
       }
     });
     
-socket.on('group_key', (data) => {
-  console.log(`🔑 Received group key v${data.version}, status: ${data.status}`);
+    socket.on('group_key', (data) => {
+  console.log(`🔑 Received group key v${data.version}, status: ${data.status} [${data.key_index}/${data.total_keys}]`);
   
   if (!state.userKey) {
     console.error('❌ User key not ready');
@@ -422,13 +422,24 @@ socket.on('group_key', (data) => {
     
     console.log(`🔑 Decrypted group key: ${decrypted.sigBytes} bytes`);
     
-    // CRITICAL FIX: Store this key version
+    // Store this key version
     state.groupKeys[data.version] = decrypted;
-    state.currentKeyVersion = data.version;
     
-    console.log(`🔑 Stored key v${data.version}, now have versions: ${Object.keys(state.groupKeys).join(', ')}`);
+    // Update current version to highest received
+    if (data.version > state.currentKeyVersion) {
+      state.currentKeyVersion = data.version;
+    }
     
-    if (data.status === 'rotated') {
+    console.log(`🔑 Stored key v${data.version}, now have versions: ${Object.keys(state.groupKeys).sort((a,b) => a-b).join(', ')}`);
+    
+    // Handle different status types
+    if (data.status === 'historical') {
+      // Historical key - just store it, don't become ready yet
+      console.log(`📚 Stored historical key v${data.version} (${data.key_index}/${data.total_keys})`);
+      // Don't set keyReady or call client_ready - we're waiting for more keys
+      
+    } else if (data.status === 'rotated') {
+      // Key rotation after kick
       console.log(`🔄 Key rotation complete to v${data.version}`);
       
       state.isProcessingKeyRotation = false;
@@ -444,11 +455,14 @@ socket.on('group_key', (data) => {
       
       console.log(`✅ Ready with v${data.version}`);
       
-    } else {
-      console.log(`✅ Initial key v${data.version} received`);
+    } else if (data.status === 'initial') {
+      // Initial key (or last key in batch) - NOW we can become ready
+      console.log(`✅ Initial/final key v${data.version} received [${data.key_index}/${data.total_keys}]`);
+      
       state.keyReady = true;
       updateStatus(`Ready - Encrypted Chat (v${data.version})`, true);
       
+      // Only notify server we're ready after a short delay to ensure all keys are processed
       setTimeout(() => {
         console.log('📢 Notifying server client is ready');
         socket.emit('client_ready');
