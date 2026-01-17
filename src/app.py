@@ -48,7 +48,6 @@ connections = {}
 active_sids = {}
 room_sids = {}
 backend = default_backend()
-file_storage = {}
 
 # Key management locks
 key_locks = {}
@@ -575,16 +574,22 @@ def download_file(file_id):
     if 'token' not in session or not is_valid_user(session['token']):
         return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
     
-    if file_id not in file_storage:
+    # Find file in uploads folder
+    import glob
+    matching_files = glob.glob(str(UPLOAD_FOLDER / f"{file_id}_*"))
+    
+    if not matching_files:
         return jsonify({'success': False, 'msg': 'File not found'}), 404
     
-    file_data = file_storage[file_id]
+    file_path = Path(matching_files[0])
+    original_filename = file_path.name.split('_', 1)[1]  # Remove "file_xxxxx_" prefix
+    
     return send_file(
-        io.BytesIO(file_data['data']),
-        download_name=file_data['filename'],
-        mimetype=file_data['content_type']
+        file_path,
+        download_name=original_filename,
+        as_attachment=True
     )
-
+    
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok', 'users': len(load_users()), 'rooms': len(db.list_public_rooms())})
@@ -905,28 +910,29 @@ def handle_file_upload(data):
         return
     
     try:
+        # Decode the base64 file data
         file_data = base64.b64decode(data['file_data'])
         filename = secure_filename(data['filename'])
         content_type = data.get('content_type', 'application/octet-stream')
         
+        # Check file size
         if len(file_data) > 16 * 1024 * 1024:
             emit('upload_error', {'msg': 'File too large (max 16MB)'})
             return
         
+        # Check file type
         if not allowed_file(filename):
             emit('upload_error', {'msg': 'File type not allowed'})
             return
         
+        # Generate unique file ID
         import secrets
         file_id = f"file_{secrets.token_hex(16)}"
         
-        file_storage[file_id] = {
-            'data': file_data,
-            'filename': filename,
-            'content_type': content_type,
-            'uploader': connections[sid]['username'],
-            'size': len(file_data)
-        }
+        # Save file to uploads folder
+        file_path = UPLOAD_FOLDER / f"{file_id}_{filename}"
+        with open(file_path, 'wb') as f:
+            f.write(file_data)
         
         emit('file_uploaded', {
             'file_id': file_id,
@@ -935,7 +941,7 @@ def handle_file_upload(data):
             'content_type': content_type
         })
         
-        logger.info(f"[FILE] Uploaded {filename} ({len(file_data)} bytes) - ID: {file_id}")
+        logger.info(f"[FILE] Saved {filename} ({len(file_data)} bytes) - ID: {file_id}")
     except Exception as e:
         logger.error(f"[FILE] Upload error: {e}")
         emit('upload_error', {'msg': f'File upload failed: {str(e)}'})
