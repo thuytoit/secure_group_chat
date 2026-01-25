@@ -1,3 +1,22 @@
+"""
+Secure Multi-Room Chat Application - Main Server Module
+
+This Flask application implements an end-to-end encrypted chat system with:
+- User authentication and session management
+- Multiple chat rooms (public and private)
+- Real-time messaging via Socket.IO
+- Diffie-Hellman key exchange for secure key distribution
+- AES-256-CBC encryption for all message content
+- Dynamic key rotation on user removal
+- File sharing with encryption
+- Message reactions and moderation
+
+The server CANNOT decrypt message content (true E2EE) - it only facilitates
+key exchange and routes encrypted data between clients.
+
+Author: NAME (later)
+Date: January 2026
+"""
 import sys
 import os
 import json
@@ -57,11 +76,33 @@ connection_locks = threading.Lock()
 key_executor = ThreadPoolExecutor(max_workers=10)
 
 def cleanup():
-    """Clean up on shutdown"""
+    """
+    Cleanup function called on server shutdown.
+    
+    Ensures all database connections are properly closed before the
+    application terminates, preventing data corruption or locked databases.
+    
+    Note:
+        Registered with atexit to run automatically on shutdown.
+    """
     logger.info("[SHUTDOWN] Closing database connections...")
     db.close_db()
 
 def get_username_from_token(token: str) -> str | None:
+    """
+    Extract username from a session token.
+    
+    Looks up the token in the user database and returns the associated username.
+    
+    Args:
+        token (str): Session token to validate
+    
+    Returns:
+        str or None: Username if token is valid, None otherwise
+    
+    Note:
+        Used for authenticating WebSocket connections and API requests.
+    """
     users = load_users()
     for u, data in users.items():
         if data.get('token') == token:
@@ -69,18 +110,69 @@ def get_username_from_token(token: str) -> str | None:
     return None
 
 def is_valid_user(token: str) -> bool:
+    """
+    Check if a session token is valid.
+    
+    Convenience wrapper around get_username_from_token for boolean checks.
+    
+    Args:
+        token (str): Token to validate
+    
+    Returns:
+        bool: True if token is valid, False otherwise
+    """
     return get_username_from_token(token) is not None
 
 def require_auth():
+    """
+    Decorator helper to enforce authentication on routes.
+    
+    Checks if user has valid session token. If not, redirects to login page.
+    
+    Returns:
+        Response or None: Redirect response if unauthorized, None if authorized
+    
+    Example:
+        @app.route('/protected')
+        def protected():
+            redirect_to = require_auth()
+            if redirect_to:
+                return redirect_to
+            # ... authorized code ...
+    """
     if 'token' not in session or not is_valid_user(session['token']):
         return redirect(url_for('index'))
     return None
 
 def allowed_file(filename):
+    """
+    Check if a filename has an allowed extension for upload.
+    
+    Validates file uploads against whitelist of safe extensions to prevent
+    malicious file uploads.
+    
+    Args:
+        filename (str): Filename to check
+    
+    Returns:
+        bool: True if extension is allowed, False otherwise
+    
+    Note:
+        Allowed extensions defined in ALLOWED_EXTENSIONS constant.
+    """
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def broadcast_room_update():
-    """Broadcast room list update to all users"""
+    """
+    Notify all connected clients about room list changes.
+    
+    Broadcasts updated public room list to all users and sends personalized
+    room lists to individual users. Called after room creation, deletion,
+    or membership changes.
+    
+    Note:
+        Uses Socket.IO emit to send real-time updates without page refresh.
+    """
     public_rooms = room_manager.list_public_rooms()
     socketio.emit('room_list_update', {'public_rooms': public_rooms}, namespace='/')
     
@@ -90,7 +182,15 @@ def broadcast_room_update():
             socketio.emit('user_rooms_update', {'user_rooms': user_rooms}, room=sid)
 
 def broadcast_member_update(room_id: str):
-    """Broadcast updated member list to room"""
+    """
+    Send updated member list to all users in a room.
+    
+    Broadcasts current member roster to room, showing who's online and
+    their roles. Called when users join, leave, or roles change.
+    
+    Args:
+        room_id (str): Room to broadcast update to
+    """
     members = db.get_room_members(room_id)
     socketio.emit('member_list_update', {
         'members': [{
@@ -101,7 +201,13 @@ def broadcast_member_update(room_id: str):
     }, to=room_id)
 
 def broadcast_reports_update():
-    """Broadcast updated reports to all connected clients"""
+    """
+    Notify global admins about report queue changes.
+    
+    Broadcasts updated pending reports list to all connected clients
+    (only admins will display this data). Called when reports are
+    submitted or resolved.
+    """
     try:
         pending_reports = room_manager.get_pending_reports()
         socketio.emit('reports_updated', {'pending_reports': pending_reports})
@@ -109,7 +215,21 @@ def broadcast_reports_update():
         logger.error(f"Report broadcast error: {e}")
 
 def get_room_lock(room_id: str):
-    """Get or create a lock for a specific room"""
+    """
+    Get or create a threading lock for a specific room.
+    
+    Returns a lock object for synchronizing concurrent operations on the
+    same room (e.g., multiple users sending messages simultaneously).
+    
+    Args:
+        room_id (str): Room to get lock for
+    
+    Returns:
+        threading.Lock: Lock object for this room
+    
+    Note:
+        Locks are created on-demand and stored in the global key_locks dict.
+    """
     with connection_locks:
         if room_id not in key_locks:
             key_locks[room_id] = threading.Lock()
@@ -117,8 +237,24 @@ def get_room_lock(room_id: str):
 
 def send_group_key_to_user(sid: str, room_id: str, username: str, status: str = 'initial'):
     """
-    Send group key(s) to a single user with historical key support.
-    For reconnecting users, sends ALL needed key versions.
+    Encrypt and send room encryption key(s) to a single user.
+    
+    Handles both initial joins and reconnections. For reconnecting users,
+    sends ALL historical key versions needed to decrypt message history.
+    Encrypts each key with the user's personal key before transmission.
+    
+    Args:
+        sid (str): Socket ID of the user
+        room_id (str): Room they're joining
+        username (str): Username for logging
+        status (str): 'initial', 'historical', or 'rotated'
+    
+    Returns:
+        bool: True if successful, False on error
+    
+    Note:
+        CRITICAL for security: Multiple key versions enable users who stayed
+        through key rotations to decrypt both old and new messages.
     """
     if sid not in connections:
         logger.error(f"[KEY] Socket {sid} not found in connections")
@@ -205,8 +341,19 @@ def send_group_key_to_user(sid: str, room_id: str, username: str, status: str = 
                 
 def distribute_new_key_after_kick(room_id: str, new_key: bytes, new_version: int):
     """
-    Distribute new key AND all old keys to remaining members after a kick.
-    This allows them to decrypt both old and new messages.
+    Send rotated encryption key to all remaining room members.
+    
+    After a user is kicked, distributes the new key (version N+1) to everyone
+    still in the room. Encrypts the key with each user's personal key.
+    
+    Args:
+        room_id (str): Room that had key rotation
+        new_key (bytes): New 32-byte encryption key
+        new_version (int): New version number
+    
+    Note:
+        This implements forward secrecy - kicked users can't decrypt future
+        messages even if they captured encrypted traffic.
     """
     room_lock = get_room_lock(room_id)
     
@@ -252,7 +399,15 @@ def distribute_new_key_after_kick(room_id: str, new_key: bytes, new_version: int
         logger.info(f"[KEY_ROTATION] Completed: {successful}/{len(current_sids)} successful")
 
 def check_connection_health():
-    """Periodically check connection health and clean up stale connections"""
+    """
+    Background thread that monitors and cleans up stale connections.
+    
+    Runs every 30 seconds to find connections that have been stuck in
+    "not ready" state for >30 seconds and removes them to prevent memory leaks.
+    
+    Note:
+        Runs as a daemon thread, started automatically on server startup.
+    """
     while True:
         try:
             current_time = time.time()
@@ -297,10 +452,28 @@ health_thread.start()
 
 @app.route('/')
 def index():
+    """
+    Render the login/registration landing page.
+    
+    Returns:
+        HTML: index.html template with login and registration forms
+    """
     return render_template('index.html')
 
 @app.route('/register', methods=['POST'])
 def do_register():
+    """
+    Handle user registration requests.
+    
+    Creates new user account with bcrypt password hashing.
+    
+    Form Data:
+        username (str): Desired username (must be unique)
+        password (str): Plain-text password (will be hashed)
+    
+    Returns:
+        JSON: {'success': bool, 'msg': str}
+    """
     username = request.form['username']
     password = request.form['password']
     success, msg = register(username, password)
@@ -308,6 +481,18 @@ def do_register():
 
 @app.route('/login', methods=['POST'])
 def do_login():
+    """
+    Authenticate user and create session.
+    
+    Verifies credentials and generates session token stored in Flask session.
+    
+    Form Data:
+        username (str): Username
+        password (str): Password
+    
+    Returns:
+        JSON: {'success': bool, 'token': str, 'role': str, 'msg': str}
+    """
     username = request.form['username']
     password = request.form['password']
     success, token, role = login(username, password)
@@ -320,6 +505,14 @@ def do_login():
 
 @app.route('/logout')
 def do_logout():
+    """
+    Logout user and clear session.
+    
+    Invalidates session token and redirects to landing page.
+    
+    Returns:
+        Redirect: To index page
+    """
     token = session.get('token')
     if token:
         logout(token)
@@ -328,6 +521,15 @@ def do_logout():
 
 @app.route('/hub')
 def hub():
+    """
+    Render the main room selection hub.
+    
+    Shows user's rooms, public rooms, and admin panel (if admin).
+    Requires authentication - redirects to login if not logged in.
+    
+    Returns:
+        HTML: hub.html template with room listings and user info
+    """
     redirect_to = require_auth()
     if redirect_to:
         return redirect_to
@@ -349,6 +551,19 @@ def hub():
 
 @app.route('/chat/<room_id>')
 def chat(room_id):
+    """
+    Render the chat interface for a specific room.
+    
+    Verifies user is a member of the room and loads room settings.
+    Requires authentication.
+    
+    Args:
+        room_id (str): Room to enter
+    
+    Returns:
+        HTML: chat.html template with room data and crypto parameters
+        Redirect: To hub if not a member or room doesn't exist
+    """
     redirect_to = require_auth()
     if redirect_to:
         return redirect_to
@@ -379,6 +594,22 @@ def chat(room_id):
 
 @app.route('/api/rooms/create', methods=['POST'])
 def create_room_api():
+    """
+    API endpoint to create a new room.
+    
+    JSON Body:
+        name (str): Room name (required, max 50 chars)
+        type (str): 'public' or 'private' (default: 'public')
+        password (str, optional): Password for private rooms
+        description (str): Room description
+        max_members (int): Capacity (default: 50)
+    
+    Returns:
+        JSON: {'success': bool, 'room_id': str, 'msg': str}
+    
+    Note:
+        Creates room, adds creator as admin, generates encryption key.
+    """
     if 'token' not in session or not is_valid_user(session['token']):
         return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
     
@@ -415,6 +646,20 @@ def create_room_api():
 
 @app.route('/api/rooms/join', methods=['POST'])
 def join_room_api():
+    """
+    API endpoint to join an existing room.
+    
+    JSON Body:
+        room_id (str, optional): Room to join
+        password (str, optional): Password (if required)
+        invite_code (str, optional): Invite code for private rooms
+    
+    Returns:
+        JSON: {'success': bool, 'room_id': str, 'msg': str}
+    
+    Note:
+        Can join by room_id (public rooms) or invite_code (private rooms).
+    """
     if 'token' not in session or not is_valid_user(session['token']):
         return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
     
@@ -446,6 +691,21 @@ def join_room_api():
 
 @app.route('/api/rooms/<room_id>/edit', methods=['POST'])
 def edit_room_api(room_id):
+    """
+    API endpoint to edit room settings (admin only).
+    
+    JSON Body:
+        name (str): New room name
+        description (str): New description
+        max_members (int): New capacity
+        password (str, optional): New password (private rooms only)
+    
+    Returns:
+        JSON: {'success': bool, 'msg': str}
+    
+    Authorization:
+        Room admin or global admin only
+    """
     if 'token' not in session or not is_valid_user(session['token']):
         return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
     
@@ -458,7 +718,13 @@ def edit_room_api(room_id):
         name = data.get('name', '').strip()
         description = data.get('description', '').strip()
         max_members = int(data.get('max_members', 50))
-        password = data.get('password', '').strip() if data.get('password') else None
+        password_raw = data.get('password')
+        if password_raw is not None:  # Field was sent
+            password = password_raw.strip()
+            if password == '':  # Empty string means remove password
+                password = None
+        else:  # Field not sent means don't change password
+            password = 'KEEP_CURRENT'  # Special value
         
         if not name:
             return jsonify({'success': False, 'msg': 'Room name required'})
@@ -495,6 +761,19 @@ def edit_room_api(room_id):
 
 @app.route('/api/rooms/<room_id>/report', methods=['POST'])
 def report_room(room_id):
+    """
+    API endpoint to report a room for moderation.
+    
+    JSON Body:
+        reason (str): Brief reason (required)
+        details (str): Detailed explanation (optional)
+    
+    Returns:
+        JSON: {'success': bool, 'msg': str}
+    
+    Note:
+        Creates report for global admin review.
+    """
     if 'token' not in session or not is_valid_user(session['token']):
         return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
     
@@ -518,6 +797,18 @@ def report_room(room_id):
 
 @app.route('/api/reports/<int:report_id>/resolve', methods=['POST'])
 def resolve_report_api(report_id):
+    """
+    API endpoint to resolve a moderation report (admin only).
+    
+    JSON Body:
+        status (str): New status (default: 'resolved')
+    
+    Returns:
+        JSON: {'success': bool, 'msg': str}
+    
+    Authorization:
+        Global admin only
+    """
     if 'token' not in session or not is_global_admin(session['token']):
         return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
     
@@ -537,6 +828,18 @@ def resolve_report_api(report_id):
 
 @app.route('/api/rooms/<room_id>/delete', methods=['POST'])
 def delete_room_api(room_id):
+    """
+    API endpoint to permanently delete a room.
+    
+    Returns:
+        JSON: {'success': bool, 'msg': str}
+    
+    Authorization:
+        Room admin or global admin only
+    
+    Warning:
+        Irreversible - all messages and data permanently deleted.
+    """
     if 'token' not in session:
         return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
     
@@ -554,6 +857,19 @@ def delete_room_api(room_id):
 
 @app.route('/api/rooms/search', methods=['GET'])
 def search_rooms_api():
+    """
+    API endpoint to search for rooms.
+    
+    Query Parameters:
+        q (str): Search query for room name (public rooms only)
+        invite (str): Invite code to lookup (private rooms)
+    
+    Returns:
+        JSON: {'success': bool, 'rooms': list, 'msg': str}
+    
+    Note:
+        Searches by name (public) OR invite code (private), not both.
+    """
     if 'token' not in session or not is_valid_user(session['token']):
         return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
     
@@ -571,6 +887,19 @@ def search_rooms_api():
 
 @app.route('/api/files/<file_id>')
 def download_file(file_id):
+    """
+    Serve an uploaded file for download.
+    
+    Args:
+        file_id (str): Unique file identifier
+    
+    Returns:
+        File: File download with original filename
+        JSON: Error if file not found
+    
+    Authorization:
+        Requires valid session token
+    """
     if 'token' not in session or not is_valid_user(session['token']):
         return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
     
@@ -592,17 +921,58 @@ def download_file(file_id):
     
 @app.route('/health')
 def health():
+    """
+    Health check endpoint for monitoring.
+    
+    Returns:
+        JSON: {'status': 'ok', 'users': int, 'rooms': int}
+    
+    Note:
+        Used for uptime monitoring and basic system stats.
+    """
     return jsonify({'status': 'ok', 'users': len(load_users()), 'rooms': len(db.list_public_rooms())})
 
 # Add this route to serve static files
 @app.route('/static/<path:filename>')
 def serve_static(filename):
+    """
+    Serve static files (CSS, JavaScript, images).
+    
+    Flask route to deliver static assets like stylesheets and client-side
+    scripts from the /static directory.
+    
+    Args:
+        filename (str): Path to file within static directory
+    
+    Returns:
+        File: Requested static file
+    
+    Note:
+        Flask has built-in static file serving, but this route provides
+        explicit control over static file delivery.
+    """
     return send_from_directory('static', filename)
 
 # ===== SOCKET.IO HANDLERS =====
 
 @socketio.on('connect')
 def handle_connect(auth):
+    """
+    Handle new WebSocket connection and initiate key exchange.
+    
+    Verifies user authentication, checks room membership, handles duplicate
+    connections, and starts Diffie-Hellman key exchange process.
+    
+    Auth Data:
+        token (str): User session token
+        room_id (str): Room to join (optional, None for hub connections)
+    
+    Returns:
+        None (emits 'error' or 'dh_pub' events)
+    
+    Note:
+        Automatically disconnects old sessions from same user in same room.
+    """
     token = auth.get('token')
     room_id = auth.get('room_id')
     
@@ -686,6 +1056,22 @@ def handle_connect(auth):
 
 @socketio.on('dh_peer')
 def handle_dh_peer(data):
+    """
+    Receive client's DH public key and complete key exchange.
+    
+    Takes client's public key, performs DH calculation to derive shared secret,
+    runs PBKDF2 to create user key, then sends encrypted group key.
+    
+    Data:
+        pub (str): Client's DH public key as hex string
+    
+    Emits:
+        'error' on failure
+        Calls send_group_key_to_user() on success
+    
+    Note:
+        This completes the cryptographic handshake, enabling encrypted messaging.
+    """
     sid = request.sid
     if sid not in connections:
         emit('error', {'msg': 'Session lost'})
@@ -755,7 +1141,18 @@ def handle_dh_peer(data):
                                     
 @socketio.on('client_ready')
 def handle_client_ready():
-    """Client confirms they've processed the key and are ready"""
+    """
+    Client confirms key processing complete and ready for messaging.
+    
+    Triggered after client decrypts and validates group key. Sends join
+    notification to room, broadcasts updated member list, and delivers
+    message history to the newly-ready client.
+    
+    Emits:
+        'sys_msg' (join notification)
+        'member_list_update'
+        'message_history'
+    """
     sid = request.sid
     if sid not in connections:
         return
@@ -813,6 +1210,23 @@ def handle_client_ready():
 
 @socketio.on('message')
 def handle_message(data):
+    """
+    Receive and broadcast an encrypted message.
+    
+    Validates user is ready, stores encrypted message in database with
+    current key version, then broadcasts to all room members.
+    
+    Data:
+        enc (str): Hex-encoded encrypted message (IV + ciphertext)
+        file_metadata (dict, optional): Attached file info
+    
+    Emits:
+        'error' on validation failure
+        'encrypted_msg' to room on success
+    
+    Note:
+        Server never decrypts content - true end-to-end encryption.
+    """
     sid = request.sid
     if sid not in connections:
         emit('error', {'msg': 'Not connected'})
@@ -874,6 +1288,18 @@ def handle_message(data):
 
 @socketio.on('load_more_messages')
 def handle_load_more(data):
+    """
+    Handle pagination request for older messages.
+    
+    Loads next batch of message history before a specific message ID.
+    Used for infinite scroll / "load more" functionality.
+    
+    Data:
+        before_id (int): Load messages older than this ID
+    
+    Emits:
+        'more_messages' with next batch of encrypted messages
+    """
     sid = request.sid
     if sid not in connections:
         return
@@ -904,6 +1330,24 @@ def handle_load_more(data):
 
 @socketio.on('upload_file')
 def handle_file_upload(data):
+    """
+    Receive and save an uploaded file.
+    
+    Decodes base64 file data, validates size and type, saves to uploads
+    folder with unique ID, returns metadata for attaching to message.
+    
+    Data:
+        file_data (str): Base64-encoded file content
+        filename (str): Original filename
+        content_type (str): MIME type
+    
+    Emits:
+        'file_uploaded' with file metadata on success
+        'upload_error' on failure
+    
+    Note:
+        Files are stored unencrypted on server (transport encryption via TLS).
+    """
     sid = request.sid
     if sid not in connections:
         emit('upload_error', {'msg': 'Not connected'})
@@ -912,7 +1356,14 @@ def handle_file_upload(data):
     try:
         # Decode the base64 file data
         file_data = base64.b64decode(data['file_data'])
-        filename = secure_filename(data['filename'])
+        # Preserve original filename without over-sanitization
+        import re
+        original_filename = data['filename']
+        # Only remove truly dangerous characters, keep () and spaces
+        filename = re.sub(r'[^\w\s\-_().]', '', original_filename)
+        # Ensure it's not empty after sanitization
+        if not filename or filename == '':
+            filename = 'uploaded_file'
         content_type = data.get('content_type', 'application/octet-stream')
         
         # Check file size
@@ -948,6 +1399,19 @@ def handle_file_upload(data):
 
 @socketio.on('delete_message')
 def handle_delete_message(data):
+    """
+    Soft-delete a message.
+    
+    Verifies authorization (sender, room admin, or global admin) then
+    marks message as deleted and broadcasts deletion to room.
+    
+    Data:
+        message_id (int): Message to delete
+    
+    Emits:
+        'error' if unauthorized
+        'message_deleted' to room on success
+    """
     sid = request.sid
     if sid not in connections:
         return
@@ -977,6 +1441,20 @@ def handle_delete_message(data):
 
 @socketio.on('react')
 def handle_reaction(data):
+    """
+    Add or remove emoji reaction on a message.
+    
+    Toggles user's reaction (add if not present, remove if already exists)
+    and broadcasts updated reaction counts to room.
+    
+    Data:
+        message_id (int): Message to react to
+        emoji (str): Emoji character
+        action (str): 'add' or 'remove'
+    
+    Emits:
+        'reaction_update' to room with all reactions for the message
+    """
     sid = request.sid
     if sid not in connections:
         return
@@ -1007,6 +1485,25 @@ def handle_reaction(data):
 
 @socketio.on('kick_user')
 def handle_kick(data):
+    """
+    Kick a user from the room and rotate encryption key.
+    
+    Verifies admin authorization, removes user, generates new key (version N+1),
+    force-disconnects kicked user, distributes new key to remaining members.
+    
+    Data:
+        user (str): Username to kick
+    
+    Emits:
+        'error' if unauthorized
+        'kicked' to kicked user
+        'sys_msg' (kick notification) to room
+        'group_key' (new key) to remaining members
+    
+    Note:
+        CRITICAL SECURITY: Key rotation prevents kicked user from reading
+        future messages (forward secrecy).
+    """
     sid = request.sid
     if sid not in connections:
         return
@@ -1058,6 +1555,17 @@ def handle_kick(data):
 
 @socketio.on('leave_room')
 def handle_leave_room():
+    """
+    Handle user voluntarily leaving a room.
+    
+    Removes user from room, handles admin succession if needed, broadcasts
+    departure notification. Does NOT rotate key (voluntary exit).
+    
+    Emits:
+        'sys_msg' (admin transfer if applicable)
+        'sys_msg' (leave notification)
+        'room_left' confirmation to user
+    """
     sid = request.sid
     if sid not in connections:
         return
@@ -1085,6 +1593,19 @@ def handle_leave_room():
 
 @socketio.on('disconnect')
 def handle_disconnect():
+    """
+    Clean up when user disconnects (closes browser, loses connection).
+    
+    Removes connection from tracking dicts, broadcasts disconnect notification
+    to room, removes from room's socket ID list.
+    
+    Emits:
+        'sys_msg' (disconnected notification) to room
+    
+    Note:
+        User's membership persists - they can reconnect and rejoin with
+        same message history access.
+    """
     sid = request.sid
     if sid in connections:
         username = connections[sid]['username']

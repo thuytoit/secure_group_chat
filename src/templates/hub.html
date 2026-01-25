@@ -1,10 +1,10 @@
 <!DOCTYPE html>
 <html>
-  <head>
-    <title>Chat Hub - {{ username }}</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/hub.css') }}">
-  </head>
+<head>
+  <title>Chat Hub - {{ username }}</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/hub.css') }}">
+</head>
 <body>
   <div class="container">
     <div class="header">
@@ -619,11 +619,15 @@
         if (result.success) {
           closePasswordPrompt();
           closeSearchModal();
-          window.location.href = `/chat/${currentPasswordRoomId}`;
+          // Use the room_id from the API response, not the variable
+          const roomIdToJoin = result.room_id || currentPasswordRoomId;
+          console.log('[PASSWORD] Redirecting to room:', roomIdToJoin);
+          window.location.href = `/chat/${roomIdToJoin}`;
         } else {
           alert(result.msg || 'Incorrect password');
         }
       } catch (err) {
+        console.error('[PASSWORD] Error:', err);
         alert('Error joining room');
       }
     }
@@ -673,7 +677,6 @@
         const result = await res.json();
         
         if (result.success) {
-          // Auto-resolve the report
           await resolveReport(reportId);
         } else {
           alert(result.msg || 'Failed to delete room');

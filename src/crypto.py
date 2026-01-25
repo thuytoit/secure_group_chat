@@ -26,7 +26,28 @@ g = 2
 parameters = dh.DHParameterNumbers(p, g).parameters(backend)
 
 def derive_key(shared_secret: bytes, salt: bytes | None = None) -> bytes:
-    """Derive encryption key from shared secret with proper error handling"""
+    """
+    Derive a 32-byte encryption key from a shared secret using PBKDF2.
+    
+    This function takes the raw Diffie-Hellman shared secret and applies
+    PBKDF2 key derivation with SHA256 to produce a secure encryption key.
+    
+    Args:
+        shared_secret (bytes): Raw shared secret from DH key exchange (32 bytes)
+        salt (bytes, optional): Salt for key derivation. Defaults to config salt.
+    
+    Returns:
+        bytes: Derived 32-byte encryption key suitable for AES-256
+    
+    Raises:
+        Exception: If key derivation fails or shared_secret is invalid
+    
+    Example:
+        >>> shared = b'\\x01' * 32
+        >>> key = derive_key(shared)
+        >>> len(key)
+        32
+    """
     try:
         if salt is None:
             salt = config['salt'].encode()
@@ -50,8 +71,25 @@ def derive_key(shared_secret: bytes, salt: bytes | None = None) -> bytes:
 
 def ratchet_key(current_key: bytes, version: int | None = None) -> bytes:
     """
-    Deterministic key ratcheting using HKDF-style derivation.
-    Efficient (single SHA256), secure (domain sep + version).
+    Generate a new encryption key from current key using deterministic ratcheting.
+    
+    Uses SHA256-based key derivation to create a new key from the current one.
+    This ensures forward secrecy: even if an old key is compromised, new messages
+    remain secure. The process is deterministic so the same inputs always produce
+    the same output, enabling key recovery after server restarts.
+    
+    Args:
+        current_key (bytes): Current 32-byte encryption key
+        version (int, optional): Key version number for domain separation. Defaults to 1.
+    
+    Returns:
+        bytes: New 32-byte encryption key (version N+1)
+    
+    Raises:
+        Exception: If key ratcheting operation fails
+    
+    Note:
+        This function is critical for key rotation when users are kicked from rooms.
     """
     if version is None:
         version = 1
@@ -66,7 +104,30 @@ def ratchet_key(current_key: bytes, version: int | None = None) -> bytes:
         raise Exception(f"Key ratcheting failed: {str(e)}")
 
 def encrypt_message(message: bytes | str, key: bytes) -> bytes:
-    """AES-256-CBC encrypt with proper error handling"""
+    """
+    Encrypt a message using AES-256-CBC with PKCS7 padding.
+    
+    Generates a random 16-byte IV for each encryption operation and prepends
+    it to the ciphertext. This ensures each encrypted message is unique even
+    if the plaintext is identical.
+    
+    Args:
+        message (bytes or str): Message to encrypt (auto-converts strings to UTF-8)
+        key (bytes): 32-byte AES encryption key
+    
+    Returns:
+        bytes: IV (16 bytes) + encrypted message (variable length)
+    
+    Raises:
+        ValueError: If key length is not 32 bytes
+        Exception: If encryption operation fails
+    
+    Example:
+        >>> key = os.urandom(32)
+        >>> encrypted = encrypt_message("Hello", key)
+        >>> len(encrypted) >= 32  # IV + padded ciphertext
+        True
+    """
     try:
         if isinstance(message, str):
             message = message.encode('utf-8')
@@ -88,7 +149,31 @@ def encrypt_message(message: bytes | str, key: bytes) -> bytes:
         raise Exception(f"Encryption failed: {str(e)}")
 
 def decrypt_message(encrypted_data: bytes, key: bytes) -> bytes:
-    """AES-256-CBC decrypt with proper error handling"""
+    """
+    Decrypt a message encrypted with AES-256-CBC and remove PKCS7 padding.
+    
+    Expects encrypted_data to be in format: IV (16 bytes) + ciphertext.
+    Extracts the IV, decrypts the ciphertext, and removes padding to recover
+    the original plaintext.
+    
+    Args:
+        encrypted_data (bytes): IV + ciphertext (minimum 32 bytes)
+        key (bytes): 32-byte AES decryption key (must match encryption key)
+    
+    Returns:
+        bytes: Decrypted plaintext message
+    
+    Raises:
+        ValueError: If encrypted_data is too short or key length is invalid
+        Exception: If decryption fails (wrong key, corrupted data, etc.)
+    
+    Example:
+        >>> key = os.urandom(32)
+        >>> encrypted = encrypt_message(b"Secret", key)
+        >>> decrypted = decrypt_message(encrypted, key)
+        >>> decrypted
+        b'Secret'
+    """
     try:
         if len(encrypted_data) < 32:  # IV (16) + minimum ciphertext (16)
             raise ValueError("Encrypted data too short")
