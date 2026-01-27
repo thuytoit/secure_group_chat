@@ -6,7 +6,8 @@ import json
 import bcrypt
 import os
 
-USERS_FILE = 'users.json'
+from pathlib import Path
+USERS_FILE = Path(__file__).parent.parent / 'users.json'
 
 def load_users():
     """

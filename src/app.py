@@ -1182,7 +1182,7 @@ def handle_client_ready():
             _, key_version = room_manager.get_room_key(room_id)
             
             # Get ALL messages since first join
-            messages = db.get_messages_after_timestamp(room_id, first_join, limit=100)
+            messages = db.get_messages_after_timestamp(room_id, first_join, limit=51)
             
             # CRITICAL FIX: Don't filter by key version!
             # Users who stayed through key rotation can decrypt both old and new keys

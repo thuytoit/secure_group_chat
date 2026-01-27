@@ -617,8 +617,8 @@
         // Restore scroll position
         container.scrollTop = oldScroll + (container.scrollHeight - oldHeight);
         
-        // Hide "Load more" if we loaded fewer than 50 messages
-        if (data.messages.length < 50) {
+        // ⭐ FIXED: Hide button if we loaded fewer than 50 messages OR if oldest message ID is 1
+        if (data.messages.length < 50 || state.oldestMessageId === 1) {
           console.log('📜 No more older messages to load');
           loadMoreBtn.style.display = 'none';
         }
