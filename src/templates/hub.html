@@ -273,7 +273,7 @@
           <div class="room-desc">${escapeHtml(room.description || 'No description')}</div>
           <div class="room-meta">
             <div>
-              <span class="room-badge badge-${room.type}">${room.type}</span>
+              <span class="room-badge badge-${room.type}">${room.type.toUpperCase()}</span>
               ${room.role === 'admin' ? '<span class="room-badge badge-admin">Admin</span>' : ''}
             </div>
             <div>👥 ${room.member_count} members</div>
@@ -282,7 +282,7 @@
         container.appendChild(card);
       });
     }
-    
+        
     function updatePublicRoomsList(rooms) {
       const container = document.getElementById('publicRoomsList');
       if (!container) return;

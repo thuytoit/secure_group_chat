@@ -25,6 +25,7 @@
       {% if room_type == 'private' %}
       <button class="btn btn-light" onclick="showInviteModal()">🔗 Show Access</button>
       {% endif %}
+      <button class="btn btn-light" onclick="showSwitchTypeModal()">🔄 Switch Type</button>
       <button class="btn btn-danger" onclick="showDeleteModal()">🗑️ Delete Room</button>
       <button class="btn btn-light" onclick="showKickModal()">👢 Kick User</button>
       {% endif %}
@@ -164,6 +165,55 @@
       
       <div class="modal-actions">
         <button class="btn btn-light" onclick="closeInviteModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Switch Room Type Modal -->
+  <div id="switchTypeModal" class="modal">
+    <div class="modal-content">
+      <h3>Switch Room Type</h3>
+      <p style="margin-bottom: 16px; color: #666;">
+        Current type: <strong>{{ room_type|capitalize }}</strong>
+      </p>
+      
+      <div class="form-group">
+        <label>New Room Type</label>
+        <select id="switchTypeSelect" onchange="togglePasswordOption()">
+          <option value="public" {% if room_type == 'private' %}selected{% endif %}>
+            Public - Anyone can join from hub
+          </option>
+          <option value="private" {% if room_type == 'public' %}selected{% endif %}>
+            Private - Requires invite link
+          </option>
+        </select>
+      </div>
+      
+      <div id="switchPasswordOption" style="display: none; margin-top: 12px;">
+        <div class="info-box">
+          💡 Switching to private will generate a NEW invite link. You can also add a password for extra security.
+        </div>
+        <div class="checkbox-group">
+          <input type="checkbox" id="switchUsePassword" name="switch_use_password">
+          <label for="switchUsePassword">Require Password</label>
+        </div>
+        <div id="switchPasswordInput" style="display: none; margin-top: 8px;">
+          <div class="input-with-toggle">
+            <input type="password" id="switchPassword" placeholder="Enter password" style="padding-right: 40px;">
+            <button type="button" class="password-toggle" onclick="togglePasswordVisibility('switchPassword', this)">
+              👁️
+            </button>
+          </div>
+        </div>
+      </div>
+      
+      <div id="switchWarning" class="info-box" style="background: #fee2e2; color: #dc2626; margin-top: 12px; display: none;">
+        ⚠️ <strong>Warning:</strong> Switching to public will remove password protection and the invite link. Anyone will be able to join this room from the hub.
+      </div>
+      
+      <div class="modal-actions">
+        <button class="btn btn-light" onclick="closeSwitchTypeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="switchRoomType()">Switch Type</button>
       </div>
     </div>
   </div>
@@ -781,6 +831,62 @@
           });
         }
       });
+
+      // Socket listener for room type changes (for other users in room)
+      socket.on('room_type_changed', (data) => {
+        if (data.room_id === ROOM_ID) {
+          const typeMsg = data.new_type === 'private' 
+            ? `🔒 Room switched to PRIVATE by admin`
+            : `🌐 Room switched to PUBLIC by admin`;
+          
+          addMessage({ 
+            text: typeMsg,
+            type: 'sys',
+            timestamp: Date.now() / 1000
+          });
+          
+          // Reload after delay to update UI
+          setTimeout(() => {
+            alert(`${data.msg}\n\nPage will reload to update room settings.`);
+            location.reload();
+          }, 2000);
+        }
+      });
+
+      // Socket listener for reaction cleanup when user leaves/kicked
+      socket.on('reactions_cleaned', (data) => {
+        console.log(`[REACTIONS] Cleaning reactions for ${data.username}`);
+        
+        // Refresh all visible reactions by re-fetching from server
+        // This ensures removed user's reactions disappear
+        Object.keys(messages).forEach(msgId => {
+          const msg = messages[msgId];
+          if (msg.reactions) {
+            // Filter out the removed user from all reactions
+            const updatedReactions = {};
+            for (const [emoji, users] of Object.entries(msg.reactions)) {
+              const filteredUsers = users.filter(u => u !== data.username);
+              if (filteredUsers.length > 0) {
+                updatedReactions[emoji] = filteredUsers;
+              }
+            }
+            
+            // Update the message data
+            messages[msgId].reactions = updatedReactions;
+            
+            // Update the UI
+            const msgEl = messageElements[msgId];
+            if (msgEl) {
+              const reactDiv = msgEl.querySelector('.reactions');
+              if (reactDiv) {
+                updateReactionsUI(reactDiv, updatedReactions, msgId);
+              }
+            }
+          }
+        });
+        
+        console.log(`[REACTIONS] Cleaned reactions for ${data.username}`);
+      });
     }
 
     function addMessage(data, skipScroll = false) {
@@ -869,7 +975,13 @@
         r.className = `reaction ${users.includes(USERNAME) ? 'own' : ''}`;
         r.textContent = `${emoji} ${users.length}`;
         r.onclick = () => toggleReaction(msgId, emoji);
-        r.title = users.join(', ');
+        
+        // Create user list with "You" for current user
+        const userList = users.map(user => 
+          user === USERNAME ? 'You' : user
+        ).join(', ');
+        
+        r.title = userList;
         reactDiv.appendChild(r);
       }
     }
@@ -1424,6 +1536,90 @@
     }
 
     setInterval(checkConnection, 5000);
+
+// ===== ROOM TYPE SWITCHING FUNCTIONS =====
+    
+    function showSwitchTypeModal() {
+      document.getElementById('switchTypeModal').classList.add('active');
+      togglePasswordOption(); // Initialize visibility
+    }
+
+    function closeSwitchTypeModal() {
+      document.getElementById('switchTypeModal').classList.remove('active');
+      document.getElementById('switchTypeSelect').selectedIndex = 0;
+      document.getElementById('switchUsePassword').checked = false;
+      document.getElementById('switchPassword').value = '';
+      document.getElementById('switchPasswordInput').style.display = 'none';
+      document.getElementById('switchPasswordOption').style.display = 'none';
+      document.getElementById('switchWarning').style.display = 'none';
+    }
+
+    function togglePasswordOption() {
+      const newType = document.getElementById('switchTypeSelect').value;
+      const passwordOption = document.getElementById('switchPasswordOption');
+      const warning = document.getElementById('switchWarning');
+      
+      if (newType === 'private') {
+        passwordOption.style.display = 'block';
+        warning.style.display = 'none';
+      } else {
+        passwordOption.style.display = 'none';
+        warning.style.display = 'block';
+      }
+    }
+
+    document.getElementById('switchUsePassword').addEventListener('change', function() {
+      document.getElementById('switchPasswordInput').style.display = this.checked ? 'block' : 'none';
+    });
+
+    async function switchRoomType() {
+      const newType = document.getElementById('switchTypeSelect').value;
+      const usePassword = document.getElementById('switchUsePassword').checked;
+      const password = usePassword ? document.getElementById('switchPassword').value.trim() : null;
+      
+      if (newType === 'private' && usePassword && !password) {
+        alert('Please enter a password or uncheck the password option');
+        return;
+      }
+      
+      const confirmMsg = newType === 'public' 
+        ? 'Switch to PUBLIC? This will remove password protection and allow anyone to join from the hub.'
+        : 'Switch to PRIVATE? A new invite link will be generated. Only users with the link can join.';
+      
+      if (!confirm(confirmMsg)) return;
+      
+      try {
+        const res = await fetch(`/api/rooms/${ROOM_ID}/switch-type`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ 
+            new_type: newType,
+            password: password
+          })
+        });
+        const result = await res.json();
+        
+        if (result.success) {
+          closeSwitchTypeModal();
+          
+          if (newType === 'private' && result.invite_code) {
+            alert(`Room switched to PRIVATE!\n\nNew Invite Code: ${result.invite_code}\n\nShare this with users you want to invite.`);
+          } else {
+            alert(result.msg);
+          }
+          
+          // Reload page to reflect changes
+          setTimeout(() => location.reload(), 1000);
+        } else {
+          alert(result.msg || 'Failed to switch room type');
+        }
+      } catch (err) {
+        alert('Error switching room type');
+        console.error(err);
+      }
+    }
+
+    // ===== END ROOM TYPE SWITCHING =====
 
     window.onclick = function(event) {
       if (event.target.classList.contains('modal')) {

@@ -759,6 +759,71 @@ def edit_room_api(room_id):
         logger.error(f"Edit room error: {e}")
         return jsonify({'success': False, 'msg': str(e)}), 500
 
+@app.route('/api/rooms/<room_id>/switch-type', methods=['POST'])
+def switch_room_type_api(room_id):
+    """
+    API endpoint to switch room between public and private modes.
+    
+    JSON Body:
+        new_type (str): 'public' or 'private'
+        password (str, optional): Password when switching to private
+    
+    Returns:
+        JSON: {'success': bool, 'invite_code': str (optional), 'msg': str}
+    
+    Authorization:
+        Room admin or global admin only
+    
+    Note:
+        Switching to private generates a new invite code for security.
+        Switching to public removes all access control.
+    """
+    if 'token' not in session or not is_valid_user(session['token']):
+        return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
+    
+    role = db.get_member_role(room_id, session['username'])
+    if role != 'admin' and not is_global_admin(session['token']):
+        return jsonify({'success': False, 'msg': 'Not authorized'}), 403
+    
+    try:
+        data = request.json
+        new_type = data.get('new_type', '').strip().lower()
+        password = data.get('password', '').strip() if data.get('password') else None
+        
+        if new_type not in ['public', 'private']:
+            return jsonify({'success': False, 'msg': 'Invalid room type'}), 400
+        
+        success, invite_code, msg = room_manager.switch_room_type(
+            room_id, 
+            session['token'], 
+            new_type, 
+            password
+        )
+        
+        if success:
+            # Broadcast room update to all clients
+            broadcast_room_update()
+            
+            # Notify users in the room
+            socketio.emit('room_type_changed', {
+                'room_id': room_id,
+                'new_type': new_type,
+                'invite_code': invite_code,
+                'msg': msg
+            }, room=room_id)
+            
+            response = {'success': True, 'msg': msg}
+            if invite_code:
+                response['invite_code'] = invite_code
+            
+            return jsonify(response)
+        else:
+            return jsonify({'success': False, 'msg': msg}), 400
+            
+    except Exception as e:
+        logger.error(f"Switch room type error: {e}")
+        return jsonify({'success': False, 'msg': str(e)}), 500
+
 @app.route('/api/rooms/<room_id>/report', methods=['POST'])
 def report_room(room_id):
     """
@@ -1553,6 +1618,12 @@ def handle_kick(data):
     broadcast_room_update()
     broadcast_member_update(room_id)
 
+    # Notify room to refresh reactions (removed kicked user's reactions)
+    socketio.emit('reactions_cleaned', {
+        'username': kicked_user,
+        'msg': f'{kicked_user} was removed from the room'
+    }, to=room_id)
+
 @socketio.on('leave_room')
 def handle_leave_room():
     """
@@ -1588,6 +1659,12 @@ def handle_leave_room():
         emit('room_left', {'msg': msg})
         broadcast_room_update()
         broadcast_member_update(room_id)
+
+        # Notify room to refresh reactions (removed leaving user's reactions)
+        socketio.emit('reactions_cleaned', {
+            'username': username,
+            'msg': f'{username} left the room'
+        }, to=room_id, include_self=False)
         
         logger.info(f"[LEAVE] {username} left {room_id}")
 

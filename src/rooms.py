@@ -275,8 +275,9 @@ class RoomManager:
                     del room_keys[room_id]
                 return True, None, "Room deleted (last member)"
         
-        # Remove member
+        # Remove member and their reactions
         db.remove_member(room_id, username, wipe_history=False)
+        db.remove_user_reactions(room_id, username)
         
         return True, new_admin, "Left room"
     
@@ -318,6 +319,8 @@ class RoomManager:
             return False, None, "Cannot kick yourself"
         
         success = db.remove_member(room_id, target_username, wipe_history=True)
+        if success:
+            db.remove_user_reactions(room_id, target_username)
         if not success:
             return False, None, "User not in room"
         
@@ -472,6 +475,83 @@ class RoomManager:
         
         return True, "Room updated successfully"
     
+    def switch_room_type(self, room_id: str, token: str, new_type: str, 
+                        password: Optional[str] = None) -> Tuple[bool, Optional[str], str]:
+        """
+        Switch a room between public and private modes.
+        
+        Only room admins or global admins can change room type.
+        When switching to private, generates new invite code and optionally sets password.
+        When switching to public, removes all access control.
+        
+        Args:
+            room_id (str): Room to modify
+            token (str): Session token of user requesting change (for auth)
+            new_type (str): 'public' or 'private'
+            password (str, optional): Password for private rooms (can be None)
+        
+        Returns:
+            tuple: (success: bool, invite_code: str or None, message: str)
+                - (True, invite_code, "Switched to private") when switching to private
+                - (True, None, "Switched to public") when switching to public
+                - (False, None, error_message) on failure
+        
+        Note:
+            Switching to private generates a NEW invite code for security.
+            All existing members retain access, but new joins require the new code.
+        """
+        # Authenticate user
+        username = self._get_username_from_token(token)
+        if not username:
+            return False, None, "Invalid session"
+        
+        # Check authorization
+        room = db.get_room(room_id)
+        if not room:
+            return False, None, "Room not found"
+        
+        is_room_admin = db.get_member_role(room_id, username) == 'admin'
+        is_global = is_global_admin(token)
+        
+        if not (is_room_admin or is_global):
+            return False, None, "Not authorized"
+        
+        # Validate type
+        if new_type not in ['public', 'private']:
+            return False, None, "Invalid room type"
+        
+        # Check if already that type
+        if room['type'] == new_type:
+            return False, None, f"Room is already {new_type}"
+        
+        try:
+            if new_type == 'private':
+                # Generate new invite code for security
+                invite_code = generate_invite_code()
+                
+                # Hash password if provided
+                password_hash = None
+                if password:
+                    password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+                
+                success = db.update_room_type(room_id, new_type, password_hash, invite_code)
+                
+                if success:
+                    return True, invite_code, f"Room switched to private. New invite code generated."
+                else:
+                    return False, None, "Failed to switch to private"
+                    
+            else:  # switching to public
+                success = db.update_room_type(room_id, new_type, None, None)
+                
+                if success:
+                    return True, None, "Room switched to public. Password and invite code removed."
+                else:
+                    return False, None, "Failed to switch to public"
+                    
+        except Exception as e:
+            return False, None, f"Error switching room type: {str(e)}"
+
     def find_room_by_invite(self, invite_code: str) -> Optional[Dict]:
         """
         Lookup a private room using its invite code.

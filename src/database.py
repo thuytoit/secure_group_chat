@@ -782,6 +782,49 @@ def get_message_reactions(message_id: int) -> Dict:
         reactions[emoji].append(username)
     return reactions
 
+def remove_user_reactions(room_id: str, username: str) -> bool:
+    """
+    Remove all reactions from a specific user in a specific room.
+    
+    Called when a user leaves or is kicked from a room to clean up
+    their reaction records. This prevents ghost reactions from users
+    who are no longer members.
+    
+    Args:
+        room_id (str): Room to remove reactions from
+        username (str): User whose reactions to remove
+    
+    Returns:
+        bool: True if removal successful, False otherwise
+    
+    Note:
+        This maintains data integrity by ensuring only active members
+        can have reactions visible on messages.
+    """
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Get all message IDs in this room
+        cursor.execute('''
+            SELECT id FROM messages WHERE room_id = ?
+        ''', (room_id,))
+        message_ids = [row['id'] for row in cursor.fetchall()]
+        
+        # Remove user's reactions from all messages in this room
+        if message_ids:
+            placeholders = ','.join('?' * len(message_ids))
+            cursor.execute(f'''
+                DELETE FROM reactions 
+                WHERE message_id IN ({placeholders}) AND username = ?
+            ''', message_ids + [username])
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB] Error removing user reactions: {e}")
+        return False
+
 # ===== REPORT OPERATIONS =====
 
 def create_report(room_id: str, reporter: str, reason: str, details: str = '') -> int:
@@ -927,6 +970,52 @@ def update_room_password(room_id: str, password_hash: Optional[str]) -> bool:
         conn.commit()
         return True
     except:
+        return False
+
+def update_room_type(room_id: str, new_type: str, password_hash: Optional[str] = None, 
+                     invite_code: Optional[str] = None) -> bool:
+    """
+    Update a room's type between public and private.
+    
+    When switching to private, generates invite code and optionally sets password.
+    When switching to public, removes password and invite code.
+    
+    Args:
+        room_id (str): Room to update
+        new_type (str): 'public' or 'private'
+        password_hash (str, optional): Bcrypt hash for private rooms
+        invite_code (str, optional): Invite code for private rooms
+    
+    Returns:
+        bool: True if update successful, False otherwise
+    
+    Note:
+        Switching to public removes all access control (password + invite code).
+        Switching to private requires generating new invite code.
+    """
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        if new_type == 'public':
+            # Remove access control when switching to public
+            cursor.execute('''
+                UPDATE rooms 
+                SET type = ?, password_hash = NULL, invite_code = NULL 
+                WHERE id = ?
+            ''', (new_type, room_id))
+        else:  # private
+            # Add access control when switching to private
+            cursor.execute('''
+                UPDATE rooms 
+                SET type = ?, password_hash = ?, invite_code = ? 
+                WHERE id = ?
+            ''', (new_type, password_hash, invite_code, room_id))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB] Error updating room type: {e}")
         return False
 
 def find_room_by_invite_code(invite_code: str) -> Optional[Dict]:
