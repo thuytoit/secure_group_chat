@@ -105,8 +105,20 @@
               <div class="report-details">
                 <strong>Room:</strong> {{ report.room_name }}<br>
                 <strong>Details:</strong> {{ report.details or 'No additional details' }}
+                {% if report.evidence_files %}
+                <br><br><strong>Evidence ({{ report.evidence_files|length }} file(s)):</strong><br>
+                <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin-top: 8px;">
+                  {% for evidence_path in report.evidence_files %}
+                  <img src="/api/evidence/{{ evidence_path.split('/')[1] }}" 
+                       style="width: 100%; height: auto; max-height: 200px; object-fit: cover; border-radius: 6px; cursor: pointer; border: 2px solid #e5e7eb;" 
+                       onclick="window.open(this.src, '_blank')" 
+                       title="Click to open full size">
+                  {% endfor %}
+                </div>
+                {% endif %}
               </div>
               <div class="report-actions">
+                <button class="btn btn-primary" onclick="viewRoomDetails('{{ report.room_id }}', {{ report.id }})">🔍 View Details</button>
                 <button class="btn btn-secondary" onclick="resolveReport({{ report.id }})">Resolve</button>
                 <button class="btn btn-danger" onclick="deleteReportedRoom('{{ report.room_id }}', {{ report.id }})">Delete Room</button>
               </div>
@@ -210,6 +222,19 @@
       <div class="form-actions">
         <button type="button" class="btn btn-secondary" onclick="closePasswordPrompt()">Cancel</button>
         <button type="button" class="btn btn-primary" onclick="submitPassword()">Join</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Room Snapshot Modal -->
+  <div id="snapshotModal" class="modal">
+    <div class="modal-content" style="max-width: 800px;">
+      <h3>🔍 Room Details & History</h3>
+      <div id="snapshotContent" style="max-height: 70vh; overflow-y: auto;">
+        <p style="text-align: center; color: #999;">Loading snapshot...</p>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeRoomDetailsModal()">Close</button>
       </div>
     </div>
   </div>
@@ -343,8 +368,28 @@
           <div class="report-details">
             <strong>Room:</strong> ${escapeHtml(report.room_name)}<br>
             <strong>Details:</strong> ${escapeHtml(report.details || 'No additional details')}
+            ${report.evidence_file ? (() => {
+              try {
+                const files = typeof report.evidence_file === 'string' && report.evidence_file.startsWith('[') 
+                  ? JSON.parse(report.evidence_file) 
+                  : [report.evidence_file];
+                
+                return `<br><br><strong>Evidence (${files.length} file(s)):</strong><br>
+                  <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin-top: 8px;">
+                    ${files.map(path => `
+                      <img src="/api/evidence/${path.split('/')[1]}" 
+                           style="width: 100%; height: auto; max-height: 200px; object-fit: cover; border-radius: 6px; cursor: pointer; border: 2px solid #e5e7eb;" 
+                           onclick="window.open(this.src, '_blank')" 
+                           title="Click to open full size">
+                    `).join('')}
+                  </div>`;
+              } catch {
+                return '';
+              }
+            })() : ''}
           </div>
           <div class="report-actions">
+            <button class="btn btn-primary" onclick="viewRoomDetails('${report.room_id}', ${report.id})">🔍 View Details</button>
             <button class="btn btn-secondary" onclick="resolveReport(${report.id})">Resolve</button>
             <button class="btn btn-danger" onclick="deleteReportedRoom('${report.room_id}', ${report.id})">Delete Room</button>
           </div>
@@ -593,6 +638,114 @@
       document.getElementById('passwordPromptModal').classList.remove('active');
     }
 
+    function displayRoomDetails(snapshot) {
+      const room = snapshot.room_info;
+      const members = snapshot.members;
+      
+      let html = `
+        <div style="background: #f9fafb; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+          <h4 style="margin-bottom: 12px;">📊 Room Information</h4>
+          <p><strong>Name:</strong> ${escapeHtml(room.name)}</p>
+          <p><strong>Type:</strong> <span class="room-badge badge-${room.type}">${room.type.toUpperCase()}</span></p>
+          <p><strong>Creator:</strong> ${escapeHtml(room.creator)}</p>
+          <p><strong>Created:</strong> ${new Date(room.created_at * 1000).toLocaleString()}</p>
+          <p><strong>Members:</strong> ${snapshot.member_count} / ${room.max_members}</p>
+          ${room.description ? `<p><strong>Description:</strong> ${escapeHtml(room.description)}</p>` : ''}
+        </div>
+        
+        <div style="background: #f9fafb; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+          <h4 style="margin-bottom: 12px;">👥 Members (${members.length})</h4>
+          <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px;">
+      `;
+      
+      members.forEach(member => {
+        const isOnline = member.is_online === 1;
+        html += `
+          <div style="padding: 8px; background: white; border-radius: 4px; font-size: 13px;">
+            <strong>${escapeHtml(member.username)}</strong>
+            ${member.role === 'admin' ? '<span class="room-badge badge-admin" style="margin-left: 4px; font-size: 10px;">ADMIN</span>' : ''}
+            <br>
+            <span style="color: ${isOnline ? '#16a34a' : '#999'};">●</span>
+            <span style="font-size: 11px; color: #666;">${isOnline ? 'Online' : 'Offline'}</span>
+          </div>
+        `;
+      });
+      
+      // Report History Section
+      const reportHistory = snapshot.report_history;
+      
+      if (reportHistory) {
+        const riskColor = reportHistory.risk_level === 'HIGH' ? '#ef4444' : 
+                         reportHistory.risk_level === 'MEDIUM' ? '#f59e0b' : '#10b981';
+        
+        html += `
+          <div style="background: #f9fafb; padding: 16px; border-radius: 8px; margin-top: 16px; border-left: 4px solid ${riskColor};">
+            <h4 style="margin-bottom: 12px;">⚠️ Report History 
+              <span style="background: ${riskColor}; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px; margin-left: 8px;">
+                ${reportHistory.risk_level} RISK
+              </span>
+            </h4>
+            
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px;">
+              <div style="padding: 12px; background: white; border-radius: 6px; text-align: center;">
+                <div style="font-size: 24px; font-weight: bold; color: #667eea;">${reportHistory.total_reports}</div>
+                <div style="font-size: 12px; color: #666;">Total Reports</div>
+              </div>
+              <div style="padding: 12px; background: white; border-radius: 6px; text-align: center;">
+                <div style="font-size: 24px; font-weight: bold; color: #f59e0b;">${reportHistory.pending_reports}</div>
+                <div style="font-size: 12px; color: #666;">Pending</div>
+              </div>
+              <div style="padding: 12px; background: white; border-radius: 6px; text-align: center;">
+                <div style="font-size: 24px; font-weight: bold; color: #10b981;">${reportHistory.resolved_reports}</div>
+                <div style="font-size: 12px; color: #666;">Resolved</div>
+              </div>
+            </div>
+            
+            <p style="font-size: 13px; color: #666; margin-bottom: 12px;">
+              📊 <strong>${reportHistory.recent_reports_7d}</strong> reports in the last 7 days
+            </p>
+        `;
+        
+        if (reportHistory.reports && reportHistory.reports.length > 0) {
+          html += '<h5 style="margin: 16px 0 8px 0; font-size: 14px;">Recent Reports:</h5>';
+          
+          // Show last 5 reports
+          reportHistory.reports.slice(0, 5).forEach(report => {
+            const date = new Date(report.timestamp * 1000);
+            const statusColor = report.status === 'pending' ? '#f59e0b' : '#10b981';
+            
+            html += `
+              <div style="padding: 10px; background: white; border-radius: 4px; margin-bottom: 8px; border-left: 3px solid ${statusColor};">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                  <strong style="font-size: 13px;">${escapeHtml(report.reason)}</strong>
+                  <span style="font-size: 11px; color: #999;">${date.toLocaleString()}</span>
+                </div>
+                <div style="font-size: 12px; color: #666;">
+                  By: ${escapeHtml(report.reporter)} | 
+                  Status: <span style="color: ${statusColor}; font-weight: 600;">${report.status.toUpperCase()}</span>
+                </div>
+                ${report.details ? `<div style="font-size: 11px; color: #999; margin-top: 4px;">${escapeHtml(report.details).substring(0, 100)}${report.details.length > 100 ? '...' : ''}</div>` : ''}
+              </div>
+            `;
+          });
+          
+          if (reportHistory.reports.length > 5) {
+            html += `<p style="font-size: 12px; color: #666; font-style: italic; text-align: center;">+ ${reportHistory.reports.length - 5} more reports</p>`;
+          }
+        } else {
+          html += '<p style="color: #10b981; font-size: 13px;">✅ No reports filed for this room</p>';
+        }
+        
+        html += '</div>';
+      }
+      
+      document.getElementById('snapshotContent').innerHTML = html;
+    }
+    
+    function closeRoomDetailsModal() {
+      document.getElementById('snapshotModal').classList.remove('active');
+    }
+
     async function submitPassword() {
       if (!currentPasswordRoomId) return;
       
@@ -684,6 +837,25 @@
       } catch (err) {
         alert('Error deleting room');
         console.error(err);
+      }
+    }
+
+    async function viewRoomDetails(roomId, reportId) {
+      document.getElementById('snapshotModal').classList.add('active');
+      document.getElementById('snapshotContent').innerHTML = '<p style="text-align: center; color: #999;">Loading snapshot...</p>';
+      
+      try {
+        const res = await fetch(`/api/rooms/${roomId}/snapshot`);
+        const result = await res.json();
+        
+        if (result.success) {
+          displayRoomDetails(result.snapshot);
+        } else {
+          document.getElementById('snapshotContent').innerHTML = `<p style="color: #ef4444;">Failed to load snapshot: ${result.msg}</p>`;
+        }
+      } catch (err) {
+        console.error('Snapshot error:', err);
+        document.getElementById('snapshotContent').innerHTML = '<p style="color: #ef4444;">Error loading snapshot</p>';
       }
     }
 

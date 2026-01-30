@@ -645,30 +645,29 @@ class RoomManager:
         """
         return db.list_public_rooms()
     
-    def create_report(self, room_id: str, reporter: str, reason: str, 
-                     details: str = '') -> Tuple[bool, str]:
+    def create_report(self, room_id: str, reporter: str, reason: str, details: str = '', evidence_file: str = None) -> Tuple[bool, str]:
         """
-        Submit a moderation report for a room.
+        Create a moderation report for a room.
         
-        Creates a report record for global admin review. Users can report
-        rooms for policy violations (spam, harassment, illegal content, etc.).
+        Submits a report with evidence attachments for admin review.
+        Supports multiple evidence files stored as JSON array.
         
         Args:
             room_id (str): Room being reported
-            reporter (str): Username filing the report
-            reason (str): Brief reason (e.g., "Spam", "Harassment")
-            details (str): Optional detailed explanation
+            reporter (str): Username of reporter
+            reason (str): Brief reason for report
+            details (str): Optional detailed explanation. Defaults to empty
+            evidence_file (str, optional): JSON string containing array of evidence 
+                                          file paths, or single path for compatibility
         
         Returns:
             tuple: (success: bool, message: str)
-                - (True, "Report #N submitted") on success
-                - (False, "Failed to submit report") on error
         """
         try:
-            report_id = db.create_report(room_id, reporter, reason, details)
-            return True, f"Report #{report_id} submitted"
-        except:
-            return False, "Failed to submit report"
+            report_id = db.create_report(room_id, reporter, reason, details, evidence_file)
+            return (True, 'Report submitted successfully')
+        except Exception as e:
+            return (False, f'Failed to create report: {str(e)}')
     
     def get_pending_reports(self) -> List[Dict]:
         """

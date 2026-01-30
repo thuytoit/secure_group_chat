@@ -1,5 +1,11 @@
-* { margin: 0; padding: 0; box-sizing: border-box; }
+/* ===== GLOBAL RESET ===== */
+* { 
+    margin: 0; 
+    padding: 0; 
+    box-sizing: border-box; 
+}
 
+/* ===== BODY & LAYOUT ===== */
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -12,6 +18,7 @@ body {
     margin: 0 auto;
 }
 
+/* ===== HEADER ===== */
 .header {
     background: white;
     padding: 20px;
@@ -31,6 +38,7 @@ body {
 .header .user-info { 
     color: #666; 
     font-size: 14px; 
+    margin-top: 4px;
 }
 
 .header .actions { 
@@ -38,6 +46,7 @@ body {
     gap: 10px; 
 }
 
+/* ===== BUTTONS ===== */
 .btn {
     padding: 10px 20px;
     border: none;
@@ -46,6 +55,8 @@ body {
     font-size: 14px;
     font-weight: 500;
     transition: all 0.3s;
+    text-decoration: none;
+    display: inline-block;
 }
 
 .btn-primary { 
@@ -54,7 +65,9 @@ body {
 }
 
 .btn-primary:hover { 
-    background: #5568d3; 
+    background: #5568d3;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(102, 126, 234, 0.3);
 }
 
 .btn-secondary { 
@@ -63,7 +76,8 @@ body {
 }
 
 .btn-secondary:hover { 
-    background: #e5e7eb; 
+    background: #e5e7eb;
+    transform: translateY(-1px);
 }
 
 .btn-danger { 
@@ -72,9 +86,11 @@ body {
 }
 
 .btn-danger:hover { 
-    background: #dc2626; 
+    background: #dc2626;
+    transform: translateY(-1px);
 }
 
+/* ===== TABS ===== */
 .tabs {
     display: flex;
     gap: 10px;
@@ -89,6 +105,7 @@ body {
     font-weight: 500;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
     transition: all 0.3s;
+    user-select: none;
 }
 
 .tab:hover { 
@@ -109,6 +126,7 @@ body {
     display: block; 
 }
 
+/* ===== SECTIONS ===== */
 .section {
     background: white;
     padding: 24px;
@@ -131,19 +149,37 @@ body {
     color: #999;
 }
 
+.empty-state svg {
+    margin: 0 auto 16px;
+    opacity: 0.5;
+}
+
+.empty-state p {
+    font-size: 14px;
+}
+
+/* ===== ROOM GRID ===== */
 .room-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: 16px;
 }
 
+@media (max-width: 768px) {
+    .room-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ===== ROOM CARDS ===== */
 .room-card {
-    border: 1px solid #e5e7eb;
+    border: 2px solid #e5e7eb;
     border-radius: 8px;
     padding: 16px;
     cursor: pointer;
     transition: all 0.3s;
     position: relative;
+    background: white;
 }
 
 .room-card:hover {
@@ -164,6 +200,7 @@ body {
     color: #666;
     margin-bottom: 12px;
     min-height: 40px;
+    line-height: 1.5;
 }
 
 .room-card .room-meta {
@@ -174,6 +211,7 @@ body {
     color: #999;
 }
 
+/* ===== BADGES ===== */
 .room-badge {
     display: inline-block;
     padding: 4px 8px;
@@ -181,6 +219,7 @@ body {
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
+    margin-right: 4px;
 }
 
 .badge-public { 
@@ -198,6 +237,7 @@ body {
     color: #d97706; 
 }
 
+/* ===== MODALS ===== */
 .modal {
     display: none;
     position: fixed;
@@ -228,8 +268,10 @@ body {
 .modal-content h3 {
     margin-bottom: 20px;
     color: #333;
+    font-size: 20px;
 }
 
+/* ===== FORM ELEMENTS ===== */
 .form-group {
     margin-bottom: 16px;
 }
@@ -242,12 +284,24 @@ body {
     font-size: 14px;
 }
 
-.form-group input, .form-group textarea, .form-group select {
+.form-group input, 
+.form-group textarea, 
+.form-group select {
     width: 100%;
     padding: 10px;
     border: 1px solid #e5e7eb;
     border-radius: 6px;
     font-size: 14px;
+    font-family: inherit;
+    transition: border-color 0.2s;
+}
+
+.form-group input:focus,
+.form-group textarea:focus,
+.form-group select:focus {
+    outline: none;
+    border-color: #667eea;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
 }
 
 .form-group textarea {
@@ -260,8 +314,11 @@ body {
     gap: 10px;
     justify-content: flex-end;
     margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid #f3f4f6;
 }
 
+/* ===== PASSWORD TOGGLE ===== */
 .password-toggle {
     position: absolute;
     right: 10px;
@@ -271,6 +328,11 @@ body {
     background: none;
     cursor: pointer;
     font-size: 18px;
+    padding: 4px;
+}
+
+.password-toggle:hover {
+    opacity: 0.7;
 }
 
 .input-with-toggle {
@@ -279,12 +341,18 @@ body {
     align-items: center;
 }
 
+/* ===== REPORTS ===== */
 .report-item {
-    padding: 12px;
+    padding: 16px;
     background: #fef3c7;
     border-radius: 6px;
     margin-bottom: 12px;
     border-left: 4px solid #d97706;
+    transition: all 0.2s;
+}
+
+.report-item:hover {
+    box-shadow: 0 2px 8px rgba(217, 119, 6, 0.2);
 }
 
 .report-item .report-header {
@@ -292,12 +360,20 @@ body {
     justify-content: space-between;
     margin-bottom: 8px;
     font-weight: 600;
+    color: #333;
 }
 
 .report-item .report-details {
     font-size: 13px;
     color: #666;
-    margin-bottom: 8px;
+    margin-bottom: 12px;
+    line-height: 1.5;
+    /* Text wrapping for long URLs/text */
+    word-wrap: break-word;
+    word-break: break-word;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    max-width: 100%;
 }
 
 .report-actions {
@@ -305,10 +381,12 @@ body {
     gap: 8px;
 }
 
+/* ===== INFO ELEMENTS ===== */
 .hint-text {
     font-size: 11px;
     color: #999;
     margin-top: 4px;
+    font-style: italic;
 }
 
 .info-box {
@@ -318,22 +396,31 @@ body {
     margin-top: 12px;
     font-size: 13px;
     color: #1e40af;
+    border-left: 4px solid #3b82f6;
+    line-height: 1.5;
 }
 
+/* ===== CHECKBOX GROUP ===== */
 .checkbox-group {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     margin-top: 8px;
+    padding: 10px;
+    background: #f9fafb;
+    border-radius: 6px;
 }
 
 .checkbox-group input[type="checkbox"] {
-    width: auto;
+    width: 18px;
+    height: 18px;
     cursor: pointer;
+    margin: 0;
 }
 
 .checkbox-group label {
     margin: 0;
     cursor: pointer;
-    font-weight: normal;
+    font-weight: 500;
+    color: #374151;
 }

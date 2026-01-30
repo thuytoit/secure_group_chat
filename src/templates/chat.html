@@ -57,11 +57,14 @@
       </div>
 
       <div class="chat-input">
+        <div id="typingIndicator" style="display: none; padding: 8px 16px; font-size: 13px; color: #666; font-style: italic;">
+          <span id="typingText"></span>
+        </div>
         <div id="filePreviewContainer"></div>
         <div class="input-wrapper">
           <textarea id="msg-input" placeholder="Waiting for encryption..." rows="1" disabled></textarea>
           <div class="input-actions">
-            <input type="file" id="fileInput" style="display: none;" onchange="handleFileSelect(event)">
+            <input type="file" id="fileInput" style="display: none;" multiple onchange="handleFileSelect(event)">
             <button class="icon-btn" onclick="document.getElementById('fileInput').click()" title="Attach file" id="attachBtn">
               📎
             </button>
@@ -93,6 +96,18 @@
       <h3>Report Room</h3>
       <input type="text" id="reportReason" placeholder="Reason (e.g., spam, harassment)">
       <textarea id="reportDetails" placeholder="Additional details (optional)"></textarea>
+      
+      <div style="margin: 16px 0;">
+        <label style="display: block; margin-bottom: 8px; font-weight: 600; font-size: 14px;">
+          📸 Attach Evidence (Required) *
+        </label>
+        <p style="font-size: 12px; color: #666; margin-bottom: 8px;">
+          Upload a screenshot or image as proof (max 5MB, .png .jpg .jpeg .gif)
+        </p>
+        <input type="file" id="reportEvidenceInput" accept="image/*" multiple style="width: 100%; padding: 8px; border: 1px solid #e5e7eb; border-radius: 6px;">
+        <div id="reportEvidencePreview" style="margin-top: 12px;"></div>
+      </div>
+      
       <div class="modal-actions">
         <button class="btn btn-light" onclick="closeReportModal()">Cancel</button>
         <button class="btn btn-danger" onclick="submitReport()">Submit Report</button>
@@ -239,7 +254,7 @@
       keyReady: false,
       currentKeyVersion: -1,
       oldestMessageId: null,
-      pendingFileMetadata: null,
+      pendingFileMetadata: [],
       isUploading: false,
       connectionAttempts: 0,
       maxConnectionAttempts: 3,
@@ -249,6 +264,12 @@
     let messages = {};
     let messageElements = {};
 
+    // ===== TYPING INDICATOR STATE =====
+    let typingUsers = new Set();
+    let typingTimeout = null;
+    let isTyping = false;
+    // ===== END TYPING INDICATOR STATE =====
+    
     function powMod(base, exp, mod) {
       let result = 1n;
       base %= mod;
@@ -539,7 +560,7 @@
               text: text,
               timestamp: msg.timestamp,
               reactions: msg.reactions || {},
-              file_metadata: msg.file_metadata
+              files: msg.files || []
             }, idx < messagesToShow.length - 5);
             
             state.receivedMessageIds.add(msg.id);
@@ -603,28 +624,33 @@
             const body = document.createElement('div');
             body.className = 'msg-body';
             
-            // Handle file attachment display
-            const hasFile = msg.file_metadata && msg.file_metadata.filename;
-            const isTextSameAsFilename = hasFile && text === msg.file_metadata.filename;
+            // Handle files - always use array format
+            const files = data.files || [];
+            const hasFile = files.length > 0;
+            const firstFilename = hasFile ? files[0].filename : null;
+            const isTextSameAsFilename = hasFile && files.length === 1 && data.text === firstFilename;
+            const isMultiFileMarker = data.text && data.text.match(/^\[\d+ files\]$/);
             
-            // Only show text if it's different from filename or no file
-            if (!isTextSameAsFilename) {
-              body.textContent = text;
+            // Show text only if it's meaningful (not just filename or file marker)
+            if (!isTextSameAsFilename && !isMultiFileMarker) {
+              body.textContent = data.text;
             }
             
             div.appendChild(body);
             
-            // Add file attachment if present
-            if (msg.file_metadata) {
-              const file = document.createElement('div');
-              file.className = 'file-attachment';
-              file.innerHTML = `
-                📄 <a href="/api/files/${msg.file_metadata.file_id}" download="${escapeHtml(msg.file_metadata.filename)}">
-                  ${escapeHtml(msg.file_metadata.filename)}
-                </a>
-                <span style="color: #999;">(${formatBytes(msg.file_metadata.size)})</span>
-              `;
-              body.appendChild(file);
+            // Add all file attachments
+            if (files.length > 0) {
+              files.forEach(fileData => {
+                const file = document.createElement('div');
+                file.className = 'file-attachment';
+                file.innerHTML = `
+                  📄 <a href="/api/files/${fileData.file_id}" download="${escapeHtml(fileData.filename)}">
+                    ${escapeHtml(fileData.filename)}
+                  </a>
+                  <span style="color: #999;">(${formatBytes(fileData.size)})</span>
+                `;
+                body.appendChild(file);
+              });
             }
             
             // Add reactions container
@@ -723,7 +749,7 @@
             text: text,
             timestamp: data.timestamp,
             reactions: data.reactions || {},
-            file_metadata: data.file_metadata
+            files: data.files || []
           });
           
           state.receivedMessageIds.add(data.id);
@@ -736,6 +762,7 @@
             text: `[Decryption error: msg v${data.key_version}, you have keys: ${Object.keys(state.groupKeys).join(', ')}]`,
             timestamp: data.timestamp,
             reactions: {},
+            files: [],
             type: 'error'
           });
           
@@ -766,33 +793,6 @@
             }
           }
         }
-      });
-
-      socket.on('file_uploaded', (data) => {
-        state.pendingFileMetadata = data;
-        state.isUploading = false;
-        
-        const container = document.getElementById('filePreviewContainer');
-        container.innerHTML = `
-          <div class="file-preview">
-            <span>📎 ${escapeHtml(data.filename)} (${formatBytes(data.size)})</span>
-            <button onclick="clearFileAttachment()">❌</button>
-          </div>
-        `;
-        
-        document.getElementById('uploadProgress').style.display = 'none';
-        document.getElementById('attachBtn').disabled = false;
-        document.getElementById('sendBtn').disabled = false;
-      });
-
-      socket.on('upload_error', (data) => {
-        alert(data.msg || 'File upload failed');
-        state.isUploading = false;
-        state.pendingFileMetadata = null;
-        document.getElementById('uploadProgress').style.display = 'none';
-        document.getElementById('filePreviewContainer').innerHTML = '';
-        document.getElementById('attachBtn').disabled = false;
-        document.getElementById('sendBtn').disabled = false;
       });
 
       socket.on('kicked', () => {
@@ -887,6 +887,17 @@
         
         console.log(`[REACTIONS] Cleaned reactions for ${data.username}`);
       });
+
+      // ===== TYPING INDICATOR LISTENER =====
+      socket.on('user_typing', (data) => {
+        if (data.is_typing) {
+          typingUsers.add(data.username);
+        } else {
+          typingUsers.delete(data.username);
+        }
+        updateTypingIndicator();
+      });
+      // ===== END TYPING INDICATOR LISTENER =====
     }
 
     function addMessage(data, skipScroll = false) {
@@ -910,27 +921,33 @@
       const body = document.createElement('div');
       body.className = 'msg-body';
       
-      // Only show text if it's different from the filename or no file
-      const hasFile = data.file_metadata && data.file_metadata.filename;
-      const isTextSameAsFilename = hasFile && data.text === data.file_metadata.filename;
+      // Handle files - always use array format
+      const files = data.files || [];
+      const hasFile = files.length > 0;
+      const firstFilename = hasFile ? files[0].filename : null;
+      const isTextSameAsFilename = hasFile && files.length === 1 && data.text === firstFilename;
+      const isMultiFileMarker = data.text && data.text.match(/^\[\d+ files\]$/);
       
-      // Show text only if: no file OR text is different from filename
-      if (!isTextSameAsFilename) {
+      // Show text only if it's meaningful (not just filename or file marker)
+      if (!isTextSameAsFilename && !isMultiFileMarker) {
         body.textContent = data.text;
       }
       
       div.appendChild(body);
 
-      if (data.file_metadata) {
-        const file = document.createElement('div');
-        file.className = 'file-attachment';
-        file.innerHTML = `
-          📄 <a href="/api/files/${data.file_metadata.file_id}" download="${escapeHtml(data.file_metadata.filename)}">
-            ${escapeHtml(data.file_metadata.filename)}
-          </a>
-          <span style="color: #999;">(${formatBytes(data.file_metadata.size)})</span>
-        `;
-        body.appendChild(file);
+      // DISPLAY ALL ATTACHED FILES
+      if (files.length > 0) {
+        files.forEach(fileData => {
+          const file = document.createElement('div');
+          file.className = 'file-attachment';
+          file.innerHTML = `
+            📄 <a href="/api/files/${fileData.file_id}" download="${escapeHtml(fileData.filename)}">
+              ${escapeHtml(fileData.filename)}
+            </a>
+            <span style="color: #999;">(${formatBytes(fileData.size)})</span>
+          `;
+          body.appendChild(file);
+        });
       }
 
       const reactDiv = document.createElement('div');
@@ -986,6 +1003,29 @@
       }
     }
 
+    // ===== TYPING INDICATOR FUNCTIONS =====
+    function updateTypingIndicator() {
+      const indicator = document.getElementById('typingIndicator');
+      const text = document.getElementById('typingText');
+      
+      if (typingUsers.size === 0) {
+        indicator.style.display = 'none';
+        return;
+      }
+      
+      indicator.style.display = 'block';
+      
+      const users = Array.from(typingUsers);
+      if (users.length === 1) {
+        text.textContent = `${users[0]} is typing...`;
+      } else if (users.length === 2) {
+        text.textContent = `${users[0]} and ${users[1]} are typing...`;
+      } else {
+        text.textContent = `${users[0]} and ${users.length - 1} others are typing...`;
+      }
+    }
+    // ===== END TYPING INDICATOR FUNCTIONS =====
+
     function updateMemberList(members) {
       const container = document.getElementById('memberList');
       const countEl = document.getElementById('memberCount');
@@ -997,15 +1037,20 @@
         div.className = 'member-item';
         const initial = member.username.charAt(0).toUpperCase();
         const isYou = member.username === USERNAME;
+        const isOnline = member.is_online === 1 || member.is_online === true;
+        
         div.innerHTML = `
           <div class="avatar">${initial}</div>
-          <div class="name">${escapeHtml(member.username)}${isYou ? ' (You)' : ''}</div>
+          <div class="name">
+            ${escapeHtml(member.username)}${isYou ? ' (You)' : ''}
+            <span class="status-dot ${isOnline ? 'online' : 'offline'}"></span>
+          </div>
           ${member.role === 'admin' ? '<div class="badge">ADMIN</div>' : ''}
         `;
         container.appendChild(div);
       });
     }
-
+    
     function escapeHtml(text) {
       const div = document.createElement('div');
       div.textContent = text;
@@ -1124,9 +1169,46 @@
       state.priv = BigInt('0x' + priv_hex);
       
       const input = document.getElementById('msg-input');
+      
+      // Auto-resize textarea
       input.addEventListener('input', function() {
         this.style.height = 'auto';
         this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+        
+        // ===== TYPING INDICATOR DETECTION =====
+        if (this.value.trim().length > 0) {
+          if (!isTyping) {
+            isTyping = true;
+            if (socket && socket.connected) {
+              socket.emit('typing_start');
+            }
+          }
+          
+          // Clear existing timeout
+          if (typingTimeout) {
+            clearTimeout(typingTimeout);
+          }
+          
+          // Stop typing after 2 seconds of no input
+          typingTimeout = setTimeout(() => {
+            isTyping = false;
+            if (socket && socket.connected) {
+              socket.emit('typing_stop');
+            }
+          }, 2000);
+        } else {
+          // Input is empty - stop typing immediately
+          if (isTyping) {
+            isTyping = false;
+            if (socket && socket.connected) {
+              socket.emit('typing_stop');
+            }
+            if (typingTimeout) {
+              clearTimeout(typingTimeout);
+            }
+          }
+        }
+        // ===== END TYPING INDICATOR DETECTION =====
       });
       
       input.addEventListener('keypress', (e) => {
@@ -1135,6 +1217,38 @@
           sendMessage();
         }
       });
+
+      // Evidence preview for reports
+      const evidenceInput = document.getElementById('reportEvidenceInput');
+      if (evidenceInput) {
+        evidenceInput.addEventListener('change', function(e) {
+          const files = Array.from(e.target.files);
+          const preview = document.getElementById('reportEvidencePreview');
+          
+          if (files.length === 0) {
+            preview.innerHTML = '';
+            return;
+          }
+          
+          preview.innerHTML = '';
+          
+          files.forEach((file, index) => {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+              const div = document.createElement('div');
+              div.style.cssText = 'border: 2px solid #e5e7eb; border-radius: 8px; padding: 8px; background: #f9fafb; margin-bottom: 8px;';
+              div.innerHTML = `
+                <img src="${e.target.result}" style="max-width: 100%; max-height: 200px; display: block; margin: 0 auto; border-radius: 4px;">
+                <p style="text-align: center; margin-top: 8px; font-size: 12px; color: #666;">
+                  ${file.name} (${(file.size / 1024).toFixed(1)} KB)
+                </p>
+              `;
+              preview.appendChild(div);
+            };
+            reader.readAsDataURL(file);
+          });
+        });
+      }
       
       initializeSocket();
     });
@@ -1143,8 +1257,8 @@
       const input = document.getElementById('msg-input');
       const msg = input.value.trim();
       
-      // FIXED: Allow sending if either message OR file exists
-      if (!msg && !state.pendingFileMetadata) return;
+      // Allow sending if either message OR file exists
+      if (!msg && state.pendingFileMetadata.length === 0) return;
       
       if (!socket || !socket.connected) {
         console.error('❌ Cannot send: Socket not connected');
@@ -1193,14 +1307,17 @@
       }
       
       try {
-        // FIXED: Use actual message if present, otherwise use file name only
+        // Determine what to encrypt
         let displayText;
         if (msg) {
-          // User typed a message
+          // User typed a message - use it
           displayText = msg;
-        } else if (state.pendingFileMetadata) {
-          // Only file, no message - use just the filename
-          displayText = state.pendingFileMetadata.filename;
+        } else if (state.pendingFileMetadata.length === 1) {
+          // Single file, no message - use filename
+          displayText = state.pendingFileMetadata[0].filename;
+        } else if (state.pendingFileMetadata.length > 1) {
+          // Multiple files, no message - use special placeholder
+          displayText = `[${state.pendingFileMetadata.length} files]`;
         } else {
           // Should never happen due to check above
           return;
@@ -1218,15 +1335,29 @@
         
         console.log(`📤 Sending message (${displayText.length} chars, ${encryptedHex.length} hex chars), key v${state.currentKeyVersion}`);
         
+        // Send message with all attached files
         socket.emit('message', {
           enc: encryptedHex,
-          file_metadata: state.pendingFileMetadata
+          files: state.pendingFileMetadata  // Changed from file_metadata to files array
         });
         
         input.value = '';
         input.style.height = 'auto';
-        clearFileAttachment();
+        state.pendingFileMetadata = [];  // ✅ Clear array
+        document.getElementById('filePreviewContainer').innerHTML = '';
         input.focus();
+        
+        // ===== STOP TYPING INDICATOR =====
+        if (isTyping) {
+          isTyping = false;
+          if (socket && socket.connected) {
+            socket.emit('typing_stop');
+          }
+          if (typingTimeout) {
+            clearTimeout(typingTimeout);
+          }
+        }
+        // ===== END STOP TYPING INDICATOR =====
         
       } catch (e) {
         console.error('❌ Encrypt error:', e);
@@ -1246,48 +1377,108 @@
     }
 
     async function handleFileSelect(event) {
-      const file = event.target.files[0];
-      if (!file) return;
+      const files = Array.from(event.target.files);
+      if (files.length === 0) return;
       
-      if (file.size > 16 * 1024 * 1024) {
-        alert('File too large (max 16MB)');
-        event.target.value = '';
-        return;
+      // Validate all files first
+      for (const file of files) {
+        if (file.size > 16 * 1024 * 1024) {
+          alert(`${file.name} is too large (max 16MB per file)`);
+          event.target.value = '';
+          return;
+        }
+        
+        if (!allowed_file(file.name)) {
+          alert(`${file.name} type not allowed`);
+          event.target.value = '';
+          return;
+        }
       }
       
-      if (!allowed_file(file.name)) {
-        alert('File type not allowed');
-        event.target.value = '';
-        return;
-      }
-      
+      // Show total upload progress
       state.isUploading = true;
       document.getElementById('attachBtn').disabled = true;
       document.getElementById('sendBtn').disabled = true;
       document.getElementById('uploadProgress').style.display = 'block';
-      document.getElementById('uploadProgress').textContent = `Uploading ${file.name}...`;
+      document.getElementById('uploadProgress').textContent = `Uploading ${files.length} file(s)...`;
       
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        const base64 = e.target.result.split(',')[1];
-        socket.emit('upload_file', {
-          file_data: base64,
-          filename: file.name,
-          content_type: file.type || 'application/octet-stream'
-        });
-      };
-      reader.onerror = () => {
-        alert('Failed to read file');
-        state.isUploading = false;
-        document.getElementById('uploadProgress').style.display = 'none';
-        document.getElementById('attachBtn').disabled = false;
-        document.getElementById('sendBtn').disabled = false;
-      };
-      reader.readAsDataURL(file);
+      // Upload files one by one
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        document.getElementById('uploadProgress').textContent = `Uploading ${i + 1}/${files.length}: ${file.name}...`;
+        
+        try {
+          const base64 = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (e) => resolve(e.target.result.split(',')[1]);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+          
+          // Upload to server
+          await new Promise((resolve, reject) => {
+            const handler = (data) => {
+              state.pendingFileMetadata.push(data);
+              resolve();
+            };
+            
+            const errorHandler = (data) => {
+              reject(new Error(data.msg || 'Upload failed'));
+            };
+            
+            socket.once('file_uploaded', handler);
+            socket.once('upload_error', errorHandler);
+            
+            socket.emit('upload_file', {
+              file_data: base64,
+              filename: file.name,
+              content_type: file.type || 'application/octet-stream'
+            });
+          });
+        } catch (err) {
+          alert(`Failed to upload ${file.name}: ${err.message}`);
+          state.isUploading = false;
+          state.pendingFileMetadata = [];
+          document.getElementById('uploadProgress').style.display = 'none';
+          document.getElementById('filePreviewContainer').innerHTML = '';
+          document.getElementById('attachBtn').disabled = false;
+          document.getElementById('sendBtn').disabled = false;
+          event.target.value = '';
+          return;
+        }
+      }
       
+      // All files uploaded successfully
+      state.isUploading = false;
+      updateFilePreview();
+      document.getElementById('uploadProgress').style.display = 'none';
+      document.getElementById('attachBtn').disabled = false;
+      document.getElementById('sendBtn').disabled = false;
       event.target.value = '';
     }
-
+    
+    function updateFilePreview() {
+      const container = document.getElementById('filePreviewContainer');
+      container.innerHTML = '';
+      
+      if (state.pendingFileMetadata.length === 0) return;
+      
+      state.pendingFileMetadata.forEach((file, index) => {
+        const preview = document.createElement('div');
+        preview.className = 'file-preview';
+        preview.innerHTML = `
+          <span>📎 ${escapeHtml(file.filename)} (${formatBytes(file.size)})</span>
+          <button onclick="removeFile(${index})">❌</button>
+        `;
+        container.appendChild(preview);
+      });
+    }
+    
+    function removeFile(index) {
+      state.pendingFileMetadata.splice(index, 1);
+      updateFilePreview();
+    }
+    
     function allowed_file(filename) {
       const ext = filename.split('.').pop().toLowerCase();
       const allowed = ['txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx', 'zip', 'mp4', 'mp3'];
@@ -1351,14 +1542,59 @@
       document.getElementById('reportModal').classList.remove('active');
       document.getElementById('reportReason').value = '';
       document.getElementById('reportDetails').value = '';
+      document.getElementById('reportEvidenceInput').value = '';
+      document.getElementById('reportEvidencePreview').innerHTML = '';
     }
 
     async function submitReport() {
       const reason = document.getElementById('reportReason').value.trim();
       const details = document.getElementById('reportDetails').value.trim();
+      const evidenceInput = document.getElementById('reportEvidenceInput');
       
       if (!reason) {
         alert('Please provide a reason');
+        return;
+      }
+      
+      // MAKE EVIDENCE MANDATORY
+      if (!evidenceInput.files || evidenceInput.files.length === 0) {
+        alert('Please attach at least one evidence file (screenshot or image)');
+        return;
+      }
+      
+      const files = Array.from(evidenceInput.files);
+      const evidenceFiles = [];
+      
+      // Validate all files first
+      for (const file of files) {
+        if (file.size > 5 * 1024 * 1024) {
+          alert(`${file.name} is too large (max 5MB per file)`);
+          return;
+        }
+        
+        if (!file.type.startsWith('image/')) {
+          alert(`${file.name} must be an image file`);
+          return;
+        }
+      }
+      
+      // Read all files as base64
+      try {
+        for (const file of files) {
+          const base64 = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+          
+          evidenceFiles.push({
+            data: base64,
+            filename: file.name
+          });
+        }
+      } catch (err) {
+        alert('Failed to read evidence files');
         return;
       }
       
@@ -1366,7 +1602,11 @@
         const res = await fetch(`/api/rooms/${ROOM_ID}/report`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ reason, details })
+          body: JSON.stringify({ 
+            reason, 
+            details,
+            evidence_files: evidenceFiles  // Array of files
+          })
         });
         const result = await res.json();
         

@@ -201,7 +201,9 @@ body {
 .member-item .name { 
     flex: 1; 
     font-size: 14px; 
-    color: #333; 
+    color: #333;
+    display: flex;  /* ✅ MAKE IT FLEX */
+    align-items: center;  /* ✅ CENTER VERTICALLY */
 }
 
 .member-item .badge {
@@ -697,4 +699,55 @@ body {
 
 .emoji-picker .emoji:hover { 
     transform: scale(1.2); 
+}
+
+/* ===== TYPING INDICATOR ===== */
+#typingIndicator {
+    animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+#typingText {
+    color: #667eea;
+    font-weight: 500;
+}
+
+/* ===== ONLINE STATUS INDICATORS ===== */
+.status-dot {
+    width: 8px;
+    height: 8px;
+    min-width: 8px;
+    min-height: 8px;
+    max-width: 8px;
+    max-height: 8px;
+    border-radius: 50%;
+    margin-left: 8px;
+    flex-shrink: 0;
+    display: inline-block;
+    vertical-align: middle;
+    position: relative;
+    top: -1px;  /* Perfect vertical alignment */
+}
+
+.status-dot.online {
+    background: #16a34a;
+    box-shadow: 0 0 6px rgba(22, 163, 74, 0.6);
+    animation: pulse 2s infinite;
+}
+
+.status-dot.offline {
+    background: #9ca3af;
+}
+
+@keyframes pulse {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.5;
+    }
 }

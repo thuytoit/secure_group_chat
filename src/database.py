@@ -447,31 +447,79 @@ def get_member_role(room_id: str, username: str) -> Optional[str]:
 
 def get_room_members(room_id: str) -> List[Dict]:
     """
-    Get list of all current members in a room.
+    Get list of all current members in a room with online status.
     
-    Retrieves member information including roles and timestamps,
+    Retrieves member information including roles, timestamps, and online status,
     ordered by join date (oldest members first).
     
     Args:
         room_id (str): Room to get members for
     
     Returns:
-        list: Member records with fields: username, role, joined_at, first_join_at
+        list: Member records with fields: username, role, joined_at, first_join_at,
+              is_online, last_seen
               Empty list if room has no members
     
     Note:
         first_join_at is critical for determining which messages each user
         should be able to decrypt based on their history in the room.
+        is_online shows real-time connection status.
     """
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT username, role, joined_at, first_join_at 
+        SELECT username, role, joined_at, first_join_at, is_online, last_seen
         FROM room_members WHERE room_id = ?
         ORDER BY joined_at ASC
     ''', (room_id,))
     rows = cursor.fetchall()
-    return [dict(row) for row in rows]
+    
+    members = []
+    for row in rows:
+        member_dict = dict(row)
+        # Ensure is_online exists (for backwards compatibility)
+        if 'is_online' not in member_dict or member_dict['is_online'] is None:
+            member_dict['is_online'] = 0
+        if 'last_seen' not in member_dict or member_dict['last_seen'] is None:
+            member_dict['last_seen'] = 0
+        members.append(member_dict)
+    
+    return members
+
+def set_user_online_status(username: str, room_id: str, is_online: bool) -> bool:
+    """
+    Update user's online status in a room.
+    
+    Called when user connects or disconnects from a room. Updates the
+    is_online flag and last_seen timestamp for presence tracking.
+    
+    Args:
+        username (str): User to update
+        room_id (str): Room to update status in
+        is_online (bool): True if user is online, False if offline
+    
+    Returns:
+        bool: True if update successful, False otherwise
+    
+    Note:
+        This enables real-time "who's online" indicators in the member list.
+    """
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        import time
+        cursor.execute('''
+            UPDATE room_members 
+            SET is_online = ?, last_seen = ?
+            WHERE room_id = ? AND username = ?
+        ''', (1 if is_online else 0, int(time.time()), room_id, username))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB] Error updating online status: {e}")
+        return False
 
 def transfer_admin(room_id: str, new_admin: str) -> bool:
     """
@@ -539,14 +587,15 @@ def save_message(room_id: str, sender: str, encrypted_content: str,
     
     Stores the encrypted message content along with metadata including which
     encryption key version was used. This allows clients to decrypt messages
-    even after key rotation events.
+    even after key rotation events. Supports multiple file attachments.
     
     Args:
         room_id (str): Room the message belongs to
         sender (str): Username of message sender
         encrypted_content (str): Hex-encoded encrypted message (IV + ciphertext)
         key_version (int): Version of room key used for encryption. Defaults to 0
-        file_metadata (dict, optional): File attachment info if present
+        file_metadata (dict or str, optional): Single file attachment dict, 
+                                               JSON string of file array, or None
     
     Returns:
         int: Unique message ID (auto-incremented)
@@ -827,18 +876,21 @@ def remove_user_reactions(room_id: str, username: str) -> bool:
 
 # ===== REPORT OPERATIONS =====
 
-def create_report(room_id: str, reporter: str, reason: str, details: str = '') -> int:
+def create_report(room_id: str, reporter: str, reason: str, details: str = '', evidence_file: str = None) -> int:
     """
     Create a moderation report for a room.
     
     Allows users to report rooms for violations (spam, harassment, etc.).
     Reports are created with 'pending' status for global admin review.
+    Can include multiple evidence files stored as JSON array.
     
     Args:
         room_id (str): Room being reported
         reporter (str): Username of person filing report
         reason (str): Short reason for report (e.g., "Spam", "Harassment")
         details (str): Optional detailed explanation. Defaults to empty
+        evidence_file (str, optional): JSON string containing array of evidence file paths,
+                                      or single path string for backward compatibility
     
     Returns:
         int: Unique report ID
@@ -849,13 +901,13 @@ def create_report(room_id: str, reporter: str, reason: str, details: str = '') -
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO reports (room_id, reporter, reason, details, timestamp)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (room_id, reporter, reason, details, datetime.now().timestamp()))
+        INSERT INTO reports (room_id, reporter, reason, details, timestamp, evidence_file)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (room_id, reporter, reason, details, datetime.now().timestamp(), evidence_file))
     report_id = cursor.lastrowid
     conn.commit()
     return report_id
-
+    
 def get_pending_reports() -> List[Dict]:
     """
     Get all unresolved moderation reports for global admin review.
@@ -1147,5 +1199,186 @@ def get_messages_after_timestamp(room_id: str, timestamp: float, limit: int = 50
     # Reverse to show oldest-to-newest for display
     return list(reversed(messages))
 
+def migrate_add_online_status():
+    """
+    Add online status tracking columns to members table.
+    
+    Adds two new columns:
+    - is_online: INTEGER (1=online, 0=offline)
+    - last_seen: REAL (Unix timestamp of last activity)
+    
+    Safe to run multiple times - checks if columns already exist.
+    """
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Check if column exists
+        cursor.execute("PRAGMA table_info(room_members)")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        if 'is_online' not in columns:
+            print("[DB] Adding online status columns to room_members table...")
+            cursor.execute('ALTER TABLE room_members ADD COLUMN is_online INTEGER DEFAULT 0')
+            cursor.execute('ALTER TABLE room_members ADD COLUMN last_seen INTEGER DEFAULT 0')
+            conn.commit()
+            print("[DB] ✅ Online status columns added successfully")
+        else:
+            print("[DB] ✅ Online status columns already exist")
+    except Exception as e:
+        print(f"[DB] Migration error: {e}")
+
+def get_room_snapshot(room_id: str) -> Dict:
+    """
+    Get a comprehensive snapshot of a room for admin review.
+    
+    Returns recent activity including messages, members, and metadata.
+    Used by global admins when reviewing reports to see room context
+    without joining the room.
+    
+    Args:
+        room_id (str): Room to get snapshot for
+    
+    Returns:
+        dict: {
+            'room_info': Room details,
+            'members': List of members with roles,
+            'recent_messages': Last 10 messages (metadata only - encrypted),
+            'member_count': Current member count,
+            'message_count': Total message count
+        }
+    
+    Note:
+        Messages are still encrypted - admin sees metadata only
+        (sender, timestamp, has_file) but cannot read content.
+        This preserves E2EE while allowing moderation.
+    """
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Get room info
+        room_info = get_room(room_id)
+        if not room_info:
+            return None
+        
+        # Get members
+        members = get_room_members(room_id)
+        
+        return {
+            'room_info': room_info,
+            'members': members,
+            'member_count': len(members)
+        }
+    except Exception as e:
+        print(f"[DB] Error getting room snapshot: {e}")
+        return None
+
+def get_room_report_history(room_id: str) -> Dict:
+    """
+    Get complete report history for a room.
+    
+    Returns all reports (pending and resolved) for admin review,
+    showing patterns of abuse and moderation history.
+    
+    Args:
+        room_id (str): Room to get history for
+    
+    Returns:
+        dict: {
+            'total_reports': int,
+            'pending_reports': int,
+            'resolved_reports': int,
+            'reports': list of all reports with details,
+            'first_report_date': timestamp or None,
+            'last_report_date': timestamp or None,
+            'risk_level': str ('HIGH', 'MEDIUM', 'LOW')
+        }
+    """
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Get all reports for this room
+        cursor.execute('''
+            SELECT * FROM reports 
+            WHERE room_id = ?
+            ORDER BY timestamp DESC
+        ''', (room_id,))
+        
+        reports = [dict(row) for row in cursor.fetchall()]
+        
+        if not reports:
+            return {
+                'total_reports': 0,
+                'pending_reports': 0,
+                'resolved_reports': 0,
+                'reports': [],
+                'first_report_date': None,
+                'last_report_date': None,
+                'risk_level': 'LOW'
+            }
+        
+        # Count by status
+        pending = [r for r in reports if r['status'] == 'pending']
+        resolved = [r for r in reports if r['status'] == 'resolved']
+        
+        # Get recent reports (last 7 days)
+        import time
+        seven_days_ago = time.time() - (7 * 24 * 60 * 60)
+        recent_reports = [r for r in reports if r['timestamp'] > seven_days_ago]
+        
+        # Calculate risk level based on report patterns
+        if len(recent_reports) >= 5:
+            risk_level = 'HIGH'
+        elif len(recent_reports) >= 2 or len(pending) >= 2:
+            risk_level = 'MEDIUM'
+        else:
+            risk_level = 'LOW'
+        
+        return {
+            'total_reports': len(reports),
+            'pending_reports': len(pending),
+            'resolved_reports': len(resolved),
+            'reports': reports,
+            'first_report_date': reports[-1]['timestamp'],  # Oldest
+            'last_report_date': reports[0]['timestamp'],   # Newest
+            'risk_level': risk_level,
+            'recent_reports_7d': len(recent_reports)
+        }
+        
+    except Exception as e:
+        print(f"[DB] Error getting report history: {e}")
+        return None
+
+def migrate_add_report_evidence():
+    """
+    Add evidence attachment support to reports table.
+    
+    Adds column:
+    - evidence_file: TEXT (path to uploaded evidence file)
+    
+    Safe to run multiple times - checks if column already exists.
+    """
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # Check if column exists
+        cursor.execute("PRAGMA table_info(reports)")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        if 'evidence_file' not in columns:
+            print("[DB] Adding evidence_file column to reports table...")
+            cursor.execute('ALTER TABLE reports ADD COLUMN evidence_file TEXT')
+            conn.commit()
+            print("[DB] ✅ Evidence column added successfully")
+        else:
+            print("[DB] ✅ Evidence column already exists")
+    except Exception as e:
+        print(f"[DB] Migration error: {e}")
+
 # Initialize database on import
 init_db()
+migrate_add_online_status()
+migrate_add_report_evidence()

@@ -8,8 +8,11 @@ This Flask application implements an end-to-end encrypted chat system with:
 - Diffie-Hellman key exchange for secure key distribution
 - AES-256-CBC encryption for all message content
 - Dynamic key rotation on user removal
-- File sharing with encryption
+- Multiple file attachments per message
 - Message reactions and moderation
+- Online presence indicators
+- Typing indicators
+- Report system with evidence attachments
 
 The server CANNOT decrypt message content (true E2EE) - it only facilitates
 key exchange and routes encrypted data between clients.
@@ -196,7 +199,9 @@ def broadcast_member_update(room_id: str):
         'members': [{
             'username': m['username'],
             'role': m['role'],
-            'joined_at': m['joined_at']
+            'joined_at': m['joined_at'],
+            'is_online': m.get('is_online', 0),  # SEND ONLINE STATUS
+            'last_seen': m.get('last_seen', 0)
         } for m in members]
     }, to=room_id)
 
@@ -540,6 +545,21 @@ def hub():
     pending_reports = []
     if is_global_admin(session['token']):
         pending_reports = room_manager.get_pending_reports()
+        # Parse evidence files JSON for display
+        for report in pending_reports:
+            if report.get('evidence_file'):
+                try:
+                    # Try to parse as JSON array
+                    evidence_files = json.loads(report['evidence_file'])
+                    if isinstance(evidence_files, list):
+                        report['evidence_files'] = evidence_files
+                    else:
+                        report['evidence_files'] = [report['evidence_file']]
+                except:
+                    # Old format - single file
+                    report['evidence_files'] = [report['evidence_file']]
+            else:
+                report['evidence_files'] = []
     
     return render_template('hub.html',
                          username=session['username'],
@@ -832,12 +852,14 @@ def report_room(room_id):
     JSON Body:
         reason (str): Brief reason (required)
         details (str): Detailed explanation (optional)
+        evidence_data (str, optional): Base64-encoded screenshot/evidence
+        evidence_filename (str, optional): Original filename of evidence
     
     Returns:
         JSON: {'success': bool, 'msg': str}
     
     Note:
-        Creates report for global admin review.
+        Creates report for global admin review with optional evidence attachment.
     """
     if 'token' not in session or not is_valid_user(session['token']):
         return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
@@ -846,11 +868,54 @@ def report_room(room_id):
         data = request.json
         reason = data.get('reason', '').strip()
         details = data.get('details', '').strip()
+        evidence_files_data = data.get('evidence_files', [])
         
         if not reason:
             return jsonify({'success': False, 'msg': 'Reason required'})
         
-        success, msg = room_manager.create_report(room_id, session['username'], reason, details)
+        # Handle multiple evidence files upload
+        evidence_paths = []
+        if evidence_files_data:
+            try:
+                # Create evidence folder if it doesn't exist
+                evidence_folder = UPLOAD_FOLDER / 'evidence'
+                evidence_folder.mkdir(exist_ok=True)
+                
+                for file_obj in evidence_files_data:
+                    evidence_data = file_obj.get('data')
+                    evidence_filename = file_obj.get('filename')
+                    
+                    if not evidence_data or not evidence_filename:
+                        continue
+                    
+                    # Decode base64
+                    file_data = base64.b64decode(evidence_data.split(',')[1] if ',' in evidence_data else evidence_data)
+                    
+                    # Validate size (max 5MB per file)
+                    if len(file_data) > 5 * 1024 * 1024:
+                        return jsonify({'success': False, 'msg': f'{evidence_filename} is too large (max 5MB)'}), 400
+                    
+                    # Generate unique filename
+                    import secrets
+                    file_ext = evidence_filename.rsplit('.', 1)[1] if '.' in evidence_filename else 'png'
+                    evidence_id = f"evidence_{secrets.token_hex(16)}.{file_ext}"
+                    evidence_path = evidence_folder / evidence_id
+                    
+                    # Save file
+                    with open(evidence_path, 'wb') as f:
+                        f.write(file_data)
+                    
+                    # Store relative path
+                    evidence_paths.append(f"evidence/{evidence_id}")
+                    logger.info(f"[EVIDENCE] Saved evidence for report: evidence/{evidence_id}")
+                
+            except Exception as e:
+                logger.error(f"[EVIDENCE] Upload error: {e}")
+                return jsonify({'success': False, 'msg': 'Failed to upload evidence'}), 500
+        
+        # Convert array to JSON string for storage
+        evidence_json = json.dumps(evidence_paths) if evidence_paths else None
+        success, msg = room_manager.create_report(room_id, session['username'], reason, details, evidence_json)
         
         if success:
             broadcast_reports_update()
@@ -859,6 +924,26 @@ def report_room(room_id):
     except Exception as e:
         logger.error(f"Report error: {e}")
         return jsonify({'success': False, 'msg': str(e)}), 500
+
+@app.route('/api/evidence/<path:filename>')
+def serve_evidence(filename):
+    """
+    Serve evidence files for admin review (admin only).
+    
+    Args:
+        filename (str): Evidence filename
+    
+    Returns:
+        File: Evidence image/file
+    
+    Authorization:
+        Global admin only
+    """
+    if 'token' not in session or not is_global_admin(session['token']):
+        return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
+    
+    evidence_folder = UPLOAD_FOLDER / 'evidence'
+    return send_from_directory(evidence_folder, filename)
 
 @app.route('/api/reports/<int:report_id>/resolve', methods=['POST'])
 def resolve_report_api(report_id):
@@ -949,6 +1034,57 @@ def search_rooms_api():
     
     rooms = room_manager.search_public_rooms(query)
     return jsonify({'success': True, 'rooms': rooms})
+
+@app.route('/api/rooms/<room_id>/snapshot', methods=['GET'])
+def get_room_snapshot_api(room_id):
+    """
+    API endpoint to get room snapshot for admin review (admin only).
+    
+    Returns comprehensive room overview including members, recent message
+    metadata (encrypted content not exposed), and room statistics.
+    
+    Args:
+        room_id (str): Room to get snapshot for
+    
+    Returns:
+        JSON: {
+            'success': bool,
+            'snapshot': {
+                'room_info': dict,
+                'members': list,
+                'recent_messages': list,
+                'member_count': int,
+                'message_count': int
+            }
+        }
+    
+    Authorization:
+        Global admin only
+    
+    Note:
+        Messages remain encrypted - admin sees metadata only.
+        Preserves E2EE while enabling moderation oversight.
+    """
+    if 'token' not in session or not is_global_admin(session['token']):
+        return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
+    
+    try:
+        snapshot = db.get_room_snapshot(room_id)
+        
+        if not snapshot:
+            return jsonify({'success': False, 'msg': 'Room not found'}), 404
+        
+        # Add report history
+        report_history = db.get_room_report_history(room_id)
+        snapshot['report_history'] = report_history
+        
+        return jsonify({
+            'success': True,
+            'snapshot': snapshot
+        })
+    except Exception as e:
+        logger.error(f"Snapshot error: {e}")
+        return jsonify({'success': False, 'msg': str(e)}), 500
 
 @app.route('/api/files/<file_id>')
 def download_file(file_id):
@@ -1095,7 +1231,11 @@ def handle_connect(auth):
     }
     
     join_room(room_id)
-    logger.info(f"[CONNECT] {username} joined room {room_id} ({sid})")
+
+    # Mark user as online
+    db.set_user_online_status(username, room_id, True)
+    
+    logger.info(f"[CONNECT] {username} joined room {room_id} ({sid}) [ONLINE]")
     
     # Start DH key exchange
     def start_dh():
@@ -1263,7 +1403,7 @@ def handle_client_ready():
                     'timestamp': msg['timestamp'],
                     'key_version': msg['key_version'],
                     'reactions': msg['reactions'],
-                    'file_metadata': msg['file_metadata']
+                    'files': json.loads(msg['file_metadata']) if msg['file_metadata'] else []
                 } for msg in messages],
                 'current_key_version': key_version
             })
@@ -1279,11 +1419,13 @@ def handle_message(data):
     Receive and broadcast an encrypted message.
     
     Validates user is ready, stores encrypted message in database with
-    current key version, then broadcasts to all room members.
+    current key version, then broadcasts to all room members. Supports
+    multiple file attachments per message.
     
     Data:
         enc (str): Hex-encoded encrypted message (IV + ciphertext)
-        file_metadata (dict, optional): Attached file info
+        files (list, optional): Array of file metadata dicts for attachments
+        file_metadata (dict, optional): Legacy single file support (deprecated)
     
     Emits:
         'error' on validation failure
@@ -1308,9 +1450,9 @@ def handle_message(data):
         return
     
     enc_msg = data.get('enc', '')
-    file_metadata = data.get('file_metadata')
-    
-    if not enc_msg and not file_metadata:
+    files = data.get('files', [])
+
+    if not enc_msg and not files:
         emit('error', {'msg': 'Empty message'})
         return
     
@@ -1324,7 +1466,9 @@ def handle_message(data):
                 return
             
             # Save message to database FIRST
-            msg_id = db.save_message(room_id, username, enc_msg, key_version, file_metadata)
+            # Convert files array to JSON for storage
+            files_json = json.dumps(files) if files else None
+            msg_id = db.save_message(room_id, username, enc_msg, key_version, files_json)
             
             # Create message payload
             msg_payload = {
@@ -1333,7 +1477,7 @@ def handle_message(data):
                 'enc': enc_msg,
                 'timestamp': datetime.datetime.now().timestamp(),
                 'key_version': key_version,
-                'file_metadata': file_metadata,
+                'files': files,  # Send as array
                 'reactions': {}
             }
             
@@ -1389,7 +1533,7 @@ def handle_load_more(data):
             'timestamp': msg['timestamp'],
             'key_version': msg['key_version'],
             'reactions': msg['reactions'],
-            'file_metadata': msg['file_metadata']
+            'files': json.loads(msg['file_metadata']) if msg['file_metadata'] else []
         } for msg in messages]
     })
 
@@ -1400,10 +1544,11 @@ def handle_file_upload(data):
     
     Decodes base64 file data, validates size and type, saves to uploads
     folder with unique ID, returns metadata for attaching to message.
+    Called multiple times for multi-file uploads (one file at a time).
     
     Data:
         file_data (str): Base64-encoded file content
-        filename (str): Original filename
+        filename (str): Original filename (preserves parentheses and spaces)
         content_type (str): MIME type
     
     Emits:
@@ -1412,6 +1557,7 @@ def handle_file_upload(data):
     
     Note:
         Files are stored unencrypted on server (transport encryption via TLS).
+        Maximum file size: 16MB per file. Multiple files uploaded sequentially.
     """
     sid = request.sid
     if sid not in connections:
@@ -1668,16 +1814,71 @@ def handle_leave_room():
         
         logger.info(f"[LEAVE] {username} left {room_id}")
 
+@socketio.on('typing_start')
+def handle_typing_start():
+    """
+    Handle user started typing event.
+    
+    Broadcasts typing status to all other users in the room.
+    Does not send to the user who is typing (include_self=False).
+    
+    Emits:
+        'user_typing' to room with is_typing=True
+    """
+    sid = request.sid
+    if sid not in connections:
+        return
+    
+    username = connections[sid]['username']
+    room_id = connections[sid]['room_id']
+    
+    # Broadcast to everyone except sender
+    emit('user_typing', {
+        'username': username,
+        'is_typing': True
+    }, to=room_id, include_self=False)
+    
+    logger.debug(f"[TYPING] {username} started typing in {room_id}")
+
+@socketio.on('typing_stop')
+def handle_typing_stop():
+    """
+    Handle user stopped typing event.
+    
+    Broadcasts to room that user is no longer typing. Called when:
+    - User hasn't typed for 2 seconds
+    - User sends a message
+    - User clears the input field
+    
+    Emits:
+        'user_typing' to room with is_typing=False
+    """
+    sid = request.sid
+    if sid not in connections:
+        return
+    
+    username = connections[sid]['username']
+    room_id = connections[sid]['room_id']
+    
+    # Broadcast to everyone except sender
+    emit('user_typing', {
+        'username': username,
+        'is_typing': False
+    }, to=room_id, include_self=False)
+    
+    logger.debug(f"[TYPING] {username} stopped typing in {room_id}")
+
 @socketio.on('disconnect')
 def handle_disconnect():
     """
     Clean up when user disconnects (closes browser, loses connection).
     
     Removes connection from tracking dicts, broadcasts disconnect notification
-    to room, removes from room's socket ID list.
+    to room, removes from room's socket ID list, and marks user as offline.
     
     Emits:
         'sys_msg' (disconnected notification) to room
+        'member_list_update' with updated online status
     
     Note:
         User's membership persists - they can reconnect and rejoin with
@@ -1694,14 +1895,22 @@ def handle_disconnect():
                 del active_sids[username]
         
         if room_id:
+            # Mark user as offline
+            db.set_user_online_status(username, room_id, False)
+            
             if room_id in room_sids and sid in room_sids[room_id]:
                 room_sids[room_id].remove(sid)
+            
             emit('sys_msg', {'type': 'disconnected', 'user': username}, room=room_id, include_self=False)
+            
+            # Broadcast updated member list with online status
+            broadcast_member_update(room_id)
+            
             leave_room(room_id, sid)
         
         del connections[sid]
-        logger.info(f"[DISCONNECT] {username}")
-
+        logger.info(f"[DISCONNECT] {username} [OFFLINE]")
+        
 logger.info("="*60)
 logger.info("🚀 STARTING SERVER - Fresh Instance")
 logger.info(f"📊 Database: {db.DB_PATH}")
