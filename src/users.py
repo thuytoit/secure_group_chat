@@ -157,3 +157,47 @@ def logout(token):
             save_users(users)
             return True
     return False
+
+def get_username_from_token(token: str):
+    """
+    Get username from session token.
+    
+    Args:
+        token (str): Session token to lookup
+    
+    Returns:
+        str or None: Username if token valid, None otherwise
+    """
+    users = load_users()
+    for username, data in users.items():
+        if data.get('token') == token:
+            return username
+    return None
+
+def delete_user_account(username):
+    """
+    Permanently delete a user account.
+    
+    This is for GDPR "Right to be Forgotten" compliance.
+    Removes user from users.json permanently.
+    
+    Args:
+        username (str): Username to delete
+    
+    Returns:
+        bool: True if deleted, False if user doesn't exist or is admin
+    """
+    users = load_users()
+    
+    # Check if user exists
+    if username not in users:
+        return False
+    
+    # Prevent deleting admin (safety check)
+    if users[username].get('role') == 'admin':
+        return False
+    
+    # Delete the user
+    del users[username]
+    save_users(users)
+    return True

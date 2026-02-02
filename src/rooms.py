@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import database as db
 import crypto
-from users import is_admin as is_global_admin, load_users, save_users
+from users import is_admin as is_global_admin, load_users, save_users, get_username_from_token
 
 # In-memory key storage (never persisted to disk for E2EE)
 room_keys = {}  # {room_id: {'key': bytes, 'version': int}}
@@ -267,6 +267,7 @@ class RoomManager:
             next_admin = db.get_next_admin(room_id, username)
             if next_admin:
                 db.transfer_admin(room_id, next_admin)
+                db.update_room_creator(room_id, next_admin)  # NEW: Update creator field
                 new_admin = next_admin
             else:
                 # Last member leaving - delete room
@@ -276,7 +277,7 @@ class RoomManager:
                 return True, None, "Room deleted (last member)"
         
         # Remove member and their reactions
-        db.remove_member(room_id, username, wipe_history=False)
+        db.remove_member(room_id, username)
         db.remove_user_reactions(room_id, username)
         
         return True, new_admin, "Left room"
@@ -305,7 +306,7 @@ class RoomManager:
             from accessing future communications, implementing forward secrecy
             in group messaging.
         """
-        kicker = self._get_username_from_token(kicker_token)
+        kicker = get_username_from_token(kicker_token)
         if not kicker:
             return False, None, "Invalid session"
         
@@ -318,7 +319,7 @@ class RoomManager:
         if kicker == target_username:
             return False, None, "Cannot kick yourself"
         
-        success = db.remove_member(room_id, target_username, wipe_history=True)
+        success = db.remove_member(room_id, target_username)
         if success:
             db.remove_user_reactions(room_id, target_username)
         if not success:
@@ -411,7 +412,7 @@ class RoomManager:
             Authorization: Only room admin or global admin can delete.
             This is irreversible - all data is permanently lost.
         """
-        username = self._get_username_from_token(token)
+        username = get_username_from_token(token)
         if not username:
             return False, "Invalid session"
         
@@ -501,7 +502,7 @@ class RoomManager:
             All existing members retain access, but new joins require the new code.
         """
         # Authenticate user
-        username = self._get_username_from_token(token)
+        username = get_username_from_token(token)
         if not username:
             return False, None, "Invalid session"
         
@@ -722,28 +723,6 @@ class RoomManager:
         for member in members:
             if member['username'] == username:
                 return member['first_join_at']
-        return None
-    
-    def _get_username_from_token(self, token: str) -> Optional[str]:
-        """
-        Internal helper to extract username from session token.
-        
-        Searches the users.json database for a matching token and returns
-        the associated username.
-        
-        Args:
-            token (str): Session token to lookup
-        
-        Returns:
-            str or None: Username if token valid, None otherwise
-        
-        Note:
-            This is a private helper method (note the _ prefix).
-        """
-        users = load_users()
-        for username, data in users.items():
-            if data.get('token') == token:
-                return username
         return None
 
 # Global instance

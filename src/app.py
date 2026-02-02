@@ -13,11 +13,15 @@ This Flask application implements an end-to-end encrypted chat system with:
 - Online presence indicators
 - Typing indicators
 - Report system with evidence attachments
+- GDPR compliance (Right to Access and Right to Erasure)
+- Live socket updates for real-time UI synchronization
+- Automatic room ownership transfer on owner departure
+- Dark mode support with user preferences
 
 The server CANNOT decrypt message content (true E2EE) - it only facilitates
 key exchange and routes encrypted data between clients.
 
-Author: NAME (later)
+Author: Thuy
 Date: January 2026
 """
 import sys
@@ -37,7 +41,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify, send_file
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.utils import secure_filename
-from users import register, login, is_admin as is_global_admin, logout, load_users
+from users import register, login, is_admin as is_global_admin, logout, load_users, get_username_from_token
+import bcrypt
 from rooms import room_manager
 import database as db
 from crypto import parameters, derive_key, encrypt_message
@@ -90,27 +95,6 @@ def cleanup():
     """
     logger.info("[SHUTDOWN] Closing database connections...")
     db.close_db()
-
-def get_username_from_token(token: str) -> str | None:
-    """
-    Extract username from a session token.
-    
-    Looks up the token in the user database and returns the associated username.
-    
-    Args:
-        token (str): Session token to validate
-    
-    Returns:
-        str or None: Username if token is valid, None otherwise
-    
-    Note:
-        Used for authenticating WebSocket connections and API requests.
-    """
-    users = load_users()
-    for u, data in users.items():
-        if data.get('token') == token:
-            return u
-    return None
 
 def is_valid_user(token: str) -> bool:
     """
@@ -1119,6 +1103,121 @@ def download_file(file_id):
         download_name=original_filename,
         as_attachment=True
     )
+
+@app.route('/api/account/delete', methods=['POST'])
+def delete_account_api():
+    """
+    Delete user account permanently (GDPR Right to Erasure).
+    
+    Returns:
+        JSON: {'success': bool, 'msg': str, 'stats': dict}
+    """
+    if 'token' not in session or not is_valid_user(session['token']):
+        return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
+    
+    try:
+        data = request.json
+        password = data.get('password', '')
+        
+        if not password:
+            return jsonify({'success': False, 'msg': 'Password required'})
+        
+        username = session['username']
+        
+        # Verify password
+        users = load_users()
+        if username not in users:
+            return jsonify({'success': False, 'msg': 'User not found'})
+        
+        if not bcrypt.checkpw(password.encode(), users[username]['password'].encode()):
+            return jsonify({'success': False, 'msg': 'Incorrect password'})
+        
+        # Get user's room memberships BEFORE deletion (for notifications)
+        user_rooms = db.get_user_room_ids(username)
+        
+        # Delete all data from database
+        stats = db.delete_user_data_gdpr(username)
+        
+        # Delete user account
+        from users import delete_user_account
+        success = delete_user_account(username)
+        
+        if success:
+            logger.info(f"[GDPR] Account deleted: {username}, Stats: {stats}")
+            
+            # LIVE UPDATE: Notify all rooms this user was in
+            for room_id in user_rooms:
+                # Skip rooms that were deleted (they're in stats['deleted_rooms'])
+                if room_id in stats.get('deleted_rooms', []):
+                    continue
+                
+                # Check if ownership was transferred
+                members = db.get_room_members(room_id)
+                admin_member = next((m for m in members if m['role'] == 'admin'), None)
+                
+                # Broadcast user deletion to room
+                socketio.emit('user_deleted', {
+                    'username': username,
+                    'msg': f'{username} deleted their account'
+                }, room=room_id)
+                
+                # If ownership transferred, notify room
+                if admin_member and admin_member['username'] != username:
+                    socketio.emit('sys_msg', {
+                        'type': 'admin_transfer',
+                        'user': admin_member['username'],
+                        'msg': f"{admin_member['username']} is now the room admin"
+                    }, room=room_id)
+                
+                # Update member list
+                broadcast_member_update(room_id)
+            
+            # CRITICAL: Broadcast room updates to hub
+            # This makes deleted rooms disappear from hub immediately
+            broadcast_room_update()
+            
+            session.clear()
+            return jsonify({
+                'success': True,
+                'msg': 'Account permanently deleted',
+                'stats': stats
+            })
+        else:
+            return jsonify({'success': False, 'msg': 'Failed to delete'})
+            
+    except Exception as e:
+        logger.error(f"[GDPR] Delete error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'msg': str(e)}), 500
+        
+@app.route('/api/account/export', methods=['GET'])
+def export_account_data():
+    """
+    Export all user data (GDPR Right to Access).
+    
+    Returns:
+        JSON: All user data for download
+    """
+    if 'token' not in session or not is_valid_user(session['token']):
+        return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
+    
+    try:
+        username = session['username']
+        
+        # Get all user data
+        user_data = db.export_user_data_gdpr(username)
+        
+        logger.info(f"[GDPR] Data exported for: {username}")
+        
+        return jsonify({
+            'success': True,
+            'data': user_data
+        })
+        
+    except Exception as e:
+        logger.error(f"[GDPR] Export error: {e}")
+        return jsonify({'success': False, 'msg': str(e)}), 500
     
 @app.route('/health')
 def health():
@@ -1570,11 +1669,7 @@ def handle_file_upload(data):
         # Preserve original filename without over-sanitization
         import re
         original_filename = data['filename']
-        # Only remove truly dangerous characters, keep () and spaces
-        filename = re.sub(r'[^\w\s\-_().]', '', original_filename)
-        # Ensure it's not empty after sanitization
-        if not filename or filename == '':
-            filename = 'uploaded_file'
+        filename = secure_filename(original_filename) or 'uploaded_file'
         content_type = data.get('content_type', 'application/octet-stream')
         
         # Check file size

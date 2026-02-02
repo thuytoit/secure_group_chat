@@ -1,0 +1,305 @@
+/* ===== DARK MODE STYLES ===== */
+/* Applied when body has class "dark-mode" */
+
+body.dark-mode {
+    background: #1a1a1a;
+    color: #e0e0e0;
+}
+
+/* ===== HUB DARK MODE ===== */
+body.dark-mode .container {
+    background: #1a1a1a;
+}
+
+body.dark-mode .header {
+    background: #2d2d2d;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.5);
+}
+
+body.dark-mode .header h1 {
+    color: #e0e0e0;
+}
+
+body.dark-mode .header .user-info {
+    color: #b0b0b0;
+}
+
+body.dark-mode .section {
+    background: #2d2d2d;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.5);
+}
+
+body.dark-mode .section h2 {
+    color: #e0e0e0;
+    border-bottom-color: #667eea;
+}
+
+body.dark-mode .tab {
+    background: #3d3d3d;
+    color: #e0e0e0;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+body.dark-mode .tab:hover {
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+}
+
+body.dark-mode .tab.active {
+    background: #667eea;
+    color: white;
+}
+
+body.dark-mode .room-card {
+    background: #3d3d3d;
+    border-color: #4d4d4d;
+}
+
+body.dark-mode .room-card:hover {
+    border-color: #667eea;
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+}
+
+body.dark-mode .room-card .room-name {
+    color: #e0e0e0;
+}
+
+body.dark-mode .room-card .room-desc {
+    color: #b0b0b0;
+}
+
+body.dark-mode .room-card .room-meta {
+    color: #909090;
+}
+
+body.dark-mode .modal-content {
+    background: #2d2d2d;
+    color: #e0e0e0;
+}
+
+body.dark-mode .modal-content h3 {
+    color: #e0e0e0;
+}
+
+body.dark-mode .modal-content input,
+body.dark-mode .modal-content textarea,
+body.dark-mode .modal-content select {
+    background: #3d3d3d;
+    border-color: #4d4d4d;
+    color: #e0e0e0;
+}
+
+body.dark-mode .modal-content input:focus,
+body.dark-mode .modal-content textarea:focus,
+body.dark-mode .modal-content select:focus {
+    border-color: #667eea;
+    background: #454545;
+}
+
+body.dark-mode .empty-state {
+    color: #909090;
+}
+
+body.dark-mode .report-item {
+    background: #3d3d3d;
+    border-left-color: #d97706;
+}
+
+body.dark-mode .report-item .report-header {
+    color: #e0e0e0;
+}
+
+body.dark-mode .report-item .report-details {
+    color: #b0b0b0;
+}
+
+body.dark-mode .checkbox-group {
+    background: #3d3d3d;
+}
+
+body.dark-mode .checkbox-group label {
+    color: #e0e0e0;
+}
+
+/* ===== CHAT DARK MODE ===== */
+body.dark-mode .chat-container {
+    background: #1a1a1a;
+}
+
+body.dark-mode .sidebar {
+    background: #2d2d2d;
+    border-right-color: #3d3d3d;
+}
+
+body.dark-mode .sidebar h3 {
+    background: #3d3d3d;
+    border-bottom-color: #4d4d4d;
+    color: #b0b0b0;
+}
+
+body.dark-mode .member-item {
+    border-bottom-color: #3d3d3d;
+}
+
+body.dark-mode .member-item .name {
+    color: #e0e0e0;
+}
+
+body.dark-mode .chat-main {
+    background: #1a1a1a;
+}
+
+body.dark-mode #messages {
+    background: #1a1a1a;
+}
+
+body.dark-mode .msg .msg-header {
+    color: #b0b0b0;
+}
+
+body.dark-mode .msg .msg-body {
+    background: #3d3d3d;
+    color: #e0e0e0;
+}
+
+body.dark-mode .msg.own .msg-body {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+
+body.dark-mode .msg.sys .msg-body {
+    background: #4d4520;
+    color: #fbbf24;
+}
+
+body.dark-mode .msg.error .msg-body {
+    background: #4d2020;
+    color: #ef4444;
+}
+
+body.dark-mode .msg-action {
+    background: #3d3d3d;
+    color: #b0b0b0;
+}
+
+body.dark-mode .msg-action:hover {
+    background: #4d4d4d;
+    color: #e0e0e0;
+}
+
+body.dark-mode .reaction {
+    background: #3d3d3d;
+}
+
+body.dark-mode .reaction:hover {
+    background: #4d4d4d;
+}
+
+body.dark-mode .reaction.own {
+    background: #4d4d6d;
+    border-color: #8b7bd8;
+}
+
+body.dark-mode .chat-input {
+    background: #2d2d2d;
+    border-top-color: #3d3d3d;
+}
+
+body.dark-mode #msg-input {
+    background: #3d3d3d;
+    border-color: #4d4d4d;
+    color: #e0e0e0;
+}
+
+body.dark-mode #msg-input:focus {
+    border-color: #667eea;
+    background: #454545;
+}
+
+body.dark-mode .icon-btn {
+    background: #3d3d3d;
+    color: #e0e0e0;
+}
+
+body.dark-mode .icon-btn:hover {
+    background: #4d4d4d;
+}
+
+body.dark-mode .file-attachment {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+body.dark-mode .file-preview {
+    background: #3d3d3d;
+    color: #e0e0e0;
+}
+
+body.dark-mode .emoji-picker {
+    background: #2d2d2d;
+    border-color: #3d3d3d;
+}
+
+body.dark-mode .load-more {
+    color: #667eea;
+}
+
+body.dark-mode .load-more:hover {
+    background: #2d2d2d;
+}
+
+/* ===== LOGIN PAGE DARK MODE ===== */
+body.dark-mode .tabs {
+    border-bottom-color: #3d3d3d;
+}
+
+body.dark-mode .form-group label {
+    color: #e0e0e0;
+}
+
+body.dark-mode .form-group input {
+    background: #3d3d3d;
+    border-color: #4d4d4d;
+    color: #e0e0e0;
+}
+
+body.dark-mode .form-group input:focus {
+    border-color: #667eea;
+    background: #454545;
+}
+
+body.dark-mode .features {
+    border-top-color: #3d3d3d;
+}
+
+body.dark-mode .feature {
+    color: #b0b0b0;
+}
+
+body.dark-mode h1, body.dark-mode .subtitle {
+    color: #e0e0e0;
+}
+
+/* ===== DARK MODE TOGGLE BUTTON ===== */
+.dark-mode-toggle {
+    position: fixed;
+    bottom: 20px;
+    left: 20px;
+    width: 50px;
+    height: 50px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border: none;
+    color: white;
+    font-size: 24px;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    transition: all 0.3s;
+    z-index: 999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.dark-mode-toggle:hover {
+    transform: scale(1.1);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+}

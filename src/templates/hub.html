@@ -4,6 +4,7 @@
   <title>Chat Hub - {{ username }}</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/hub.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/dark-mode.css') }}">
 </head>
 <body>
   <div class="container">
@@ -20,6 +21,8 @@
       <div class="actions">
         <button class="btn btn-primary" onclick="showCreateModal()">+ Create Room</button>
         <button class="btn btn-secondary" onclick="showSearchModal()">🔍 Search</button>
+        <button class="btn btn-secondary" onclick="exportAccountData()">📥 Export Data</button>
+        <button class="btn btn-danger" onclick="showDeleteAccountModal()">🗑️ Delete Account</button>
         <a href="/logout" class="btn btn-secondary">Logout</a>
       </div>
     </div>
@@ -235,6 +238,43 @@
       </div>
       <div class="form-actions">
         <button type="button" class="btn btn-secondary" onclick="closeRoomDetailsModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete Account Modal (GDPR) -->
+  <div id="deleteAccountModal" class="modal">
+    <div class="modal-content">
+      <h3>⚠️ Permanently Delete Account</h3>
+      <p style="color: #dc2626; font-weight: 600; margin-bottom: 16px;">
+        WARNING: This action CANNOT be undone!
+      </p>
+      <p style="margin-bottom: 16px; color: #666;">
+        This will permanently delete:
+      </p>
+      <ul style="margin-left: 20px; margin-bottom: 16px; color: #666;">
+        <li>Your account and login credentials</li>
+        <li>All messages you sent ({{ username }})</li>
+        <li>All your reactions</li>
+        <li>All room memberships</li>
+        <li>All reports you filed</li>
+      </ul>
+      <p style="background: #fee2e2; padding: 12px; border-radius: 6px; margin-bottom: 16px; color: #991b1b;">
+        <strong>GDPR Notice:</strong> This is your "Right to Erasure" under GDPR.
+        Once deleted, this data cannot be recovered.
+      </p>
+      <div class="form-group">
+        <label>Enter your password to confirm:</label>
+        <div class="input-with-toggle">
+          <input type="password" id="deleteAccountPassword" placeholder="Your password" style="padding-right: 40px;">
+          <button type="button" class="password-toggle" onclick="togglePasswordVisibility('deleteAccountPassword', this)">
+            👁️
+          </button>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeDeleteAccountModal()">Cancel</button>
+        <button type="button" class="btn btn-danger" onclick="confirmDeleteAccount()">Delete Forever</button>
       </div>
     </div>
   </div>
@@ -870,6 +910,131 @@
         document.querySelectorAll('.modal').forEach(m => m.classList.remove('active'));
       }
     });
+
+    // ===== GDPR FUNCTIONS =====
+
+    function showDeleteAccountModal() {
+      document.getElementById('deleteAccountModal').classList.add('active');
+    }
+
+    function closeDeleteAccountModal() {
+      document.getElementById('deleteAccountModal').classList.remove('active');
+      document.getElementById('deleteAccountPassword').value = '';
+    }
+
+    async function confirmDeleteAccount() {
+      const password = document.getElementById('deleteAccountPassword').value.trim();
+      
+      if (!password) {
+        alert('Please enter your password to confirm');
+        return;
+      }
+      
+      // Final confirmation
+      const confirmed = confirm(
+        '⚠️ FINAL WARNING ⚠️\n\n' +
+        'This will PERMANENTLY delete your account and ALL your data.\n\n' +
+        'This action CANNOT be undone.\n\n' +
+        'Are you absolutely sure?'
+      );
+      
+      if (!confirmed) return;
+      
+      try {
+        const res = await fetch('/api/account/delete', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ password: password })
+        });
+        
+        const result = await res.json();
+        
+        if (result.success) {
+          alert(
+            '✅ Account Deleted Successfully\n\n' +
+            'Deleted:\n' +
+            `• ${result.stats.messages_deleted} messages\n` +
+            `• ${result.stats.reactions_deleted} reactions\n` +
+            `• ${result.stats.memberships_deleted} room memberships\n` +
+            `• ${result.stats.reports_deleted} reports\n\n` +
+            'You will now be redirected to the login page.'
+          );
+          
+          // Redirect to login
+          window.location = '/';
+        } else {
+          alert('Error: ' + result.msg);
+        }
+      } catch (err) {
+        alert('Failed to delete account. Please try again.');
+        console.error(err);
+      }
+    }
+
+    async function exportAccountData() {
+      if (!confirm('Export all your data?\n\nThis will download a JSON file containing all your messages, reactions, room memberships, and reports.')) {
+        return;
+      }
+      
+      try {
+        const res = await fetch('/api/account/export');
+        const result = await res.json();
+        
+        if (result.success) {
+          // Create downloadable file
+          const dataStr = JSON.stringify(result.data, null, 2);
+          const dataBlob = new Blob([dataStr], { type: 'application/json' });
+          
+          // Create download link
+          const url = window.URL.createObjectURL(dataBlob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = `my-data-${USERNAME}-${new Date().toISOString().split('T')[0]}.json`;
+          
+          // Trigger download
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          
+          alert(
+            '✅ Data Exported Successfully\n\n' +
+            `Total messages: ${result.data.messages.length}\n` +
+            `Total reactions: ${result.data.reactions.length}\n` +
+            `Room memberships: ${result.data.room_memberships.length}\n` +
+            `Reports filed: ${result.data.reports_filed.length}\n\n` +
+            'File has been downloaded.'
+          );
+        } else {
+          alert('Error: ' + result.msg);
+        }
+      } catch (err) {
+        alert('Failed to export data. Please try again.');
+        console.error(err);
+      }
+    }
+  </script>
+
+  <!-- Dark Mode Toggle -->
+  <button class="dark-mode-toggle" onclick="toggleDarkMode()" title="Toggle Dark Mode">
+    🌙
+  </button>
+  
+  <script>
+    // Dark mode functionality
+    function toggleDarkMode() {
+      document.body.classList.toggle('dark-mode');
+      
+      if (document.body.classList.contains('dark-mode')) {
+        localStorage.setItem('darkMode', 'enabled');
+      } else {
+        localStorage.setItem('darkMode', 'disabled');
+      }
+    }
+    
+    // Load saved preference on page load
+    if (localStorage.getItem('darkMode') === 'enabled') {
+      document.body.classList.add('dark-mode');
+    }
   </script>
 </body>
 </html>

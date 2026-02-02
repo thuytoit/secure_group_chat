@@ -386,18 +386,16 @@ def add_member(room_id: str, username: str, role: str = 'member') -> bool:
         print(f"[DB] Error adding member: {e}")
         return False
                 
-def remove_member(room_id: str, username: str, wipe_history: bool = False) -> bool:
+def remove_member(room_id: str, username: str) -> bool:
     """
     Remove a user from a room's member list.
     
     Deletes the user's membership record, preventing future access to the room.
-    The wipe_history parameter is currently unused but reserved for potential
     future functionality to delete the user's message history.
     
     Args:
         room_id (str): Room to remove user from
         username (str): Username to remove
-        wipe_history (bool): Reserved for future use. Defaults to False
     
     Returns:
         bool: True if removal successful, False otherwise
@@ -1377,6 +1375,376 @@ def migrate_add_report_evidence():
             print("[DB] ✅ Evidence column already exists")
     except Exception as e:
         print(f"[DB] Migration error: {e}")
+
+def update_room_creator(room_id: str, new_creator: str) -> bool:
+    """
+    Update the creator/owner field for a room.
+    
+    Used when room ownership transfers to ensure the hub displays
+    the correct current owner, not the original creator.
+    
+    Args:
+        room_id (str): Room to update
+        new_creator (str): New owner username
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE rooms SET creator = ? WHERE id = ?
+        ''', (new_creator, room_id))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB] Error updating room creator: {e}")
+        return False
+
+def get_user_room_ids(username: str) -> list:
+    """
+    Get list of room IDs that a user is a member of.
+    
+    Args:
+        username (str): Username to lookup
+    
+    Returns:
+        list: List of room_id strings
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute('''
+            SELECT DISTINCT room_id 
+            FROM room_members 
+            WHERE username = ?
+        ''', (username,))
+        
+        return [row['room_id'] for row in cursor.fetchall()]
+    except Exception as e:
+        print(f"[ERROR] Failed to get user room IDs: {e}")
+        return []
+
+def delete_user_data_gdpr(username: str) -> dict:
+    """
+    Delete ALL data associated with a user (GDPR compliance).
+    
+    Removes:
+    - All messages sent by user
+    - All reactions by user
+    - All room memberships (and transfers room ownership if needed)
+    - All reports filed by user
+    - All uploaded files by user
+    
+    Args:
+        username (str): Username to delete data for
+    
+    Returns:
+        dict: Statistics about what was deleted including deleted_rooms list
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    stats = {
+        'messages_deleted': 0,
+        'reactions_deleted': 0,
+        'memberships_deleted': 0,
+        'reports_deleted': 0,
+        'files_deleted': 0,
+        'rooms_transferred': 0,
+        'deleted_rooms': []  # NEW: Track which rooms were deleted
+    }
+    
+    try:
+        from pathlib import Path
+        import json
+        import glob
+        
+        upload_folder = Path(__file__).parent / 'uploads'
+        
+        # STEP 1: COUNT EVERYTHING FIRST (before any deletions)
+        cursor.execute('SELECT COUNT(*) FROM messages WHERE sender = ?', (username,))
+        stats['messages_deleted'] = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM reactions WHERE username = ?', (username,))
+        stats['reactions_deleted'] = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM room_members WHERE username = ?', (username,))
+        stats['memberships_deleted'] = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM reports WHERE reporter = ?', (username,))
+        stats['reports_deleted'] = cursor.fetchone()[0]
+        
+        # STEP 2: DELETE UPLOADED FILES
+        print(f"[GDPR] Looking for files uploaded by {username}...")
+        cursor.execute('''
+            SELECT id, file_metadata 
+            FROM messages 
+            WHERE sender = ? AND file_metadata IS NOT NULL
+        ''', (username,))
+
+        file_rows = cursor.fetchall()
+        print(f"[GDPR] Found {len(file_rows)} messages with file metadata")
+
+        for row in file_rows:
+            try:
+                file_metadata_raw = row['file_metadata']
+                print(f"[GDPR] Message {row['id']} raw metadata type: {type(file_metadata_raw)}")
+                
+                # CRITICAL: SQLite stores JSON as STRING, so we need to parse it
+                files = json.loads(file_metadata_raw)
+                print(f"[GDPR] After 1st parse, type: {type(files)}")
+                
+                # Handle different formats
+                if isinstance(files, str):
+                    # It's STILL a string - parse again!
+                    # This happens when JSON is double-encoded
+                    print(f"[GDPR] Still string after 1st parse, parsing again...")
+                    try:
+                        files = json.loads(files)
+                        print(f"[GDPR] After 2nd parse, type: {type(files)}")
+                    except:
+                        # Really is just a plain string (old format)
+                        print(f"[GDPR] Plain string (no JSON): {files[:50]}...")
+                        continue
+                
+                elif isinstance(files, dict):
+                    # Single file dict format
+                    print(f"[GDPR] Single file dict format")
+                    files = [files]
+                
+                elif isinstance(files, list):
+                    # Multiple files array format (correct format)
+                    print(f"[GDPR] Array format with {len(files)} files")
+                
+                else:
+                    print(f"[GDPR] Unknown format: {type(files)}")
+                    continue
+                
+                # Now files should be a list of dicts
+                for idx, file_info in enumerate(files):
+                    if not isinstance(file_info, dict):
+                        print(f"[GDPR] File {idx} is not a dict: {type(file_info)}")
+                        continue
+                    
+                    file_id = file_info.get('file_id')
+                    filename = file_info.get('filename', 'unknown')
+                    
+                    if not file_id:
+                        print(f"[GDPR] No file_id in file {idx}")
+                        continue
+                    
+                    print(f"[GDPR] Looking for file_id: {file_id}, filename: {filename}")
+                    
+                    # Find and delete the file
+                    search_pattern = str(upload_folder / f"{file_id}_*")
+                    matching_files = glob.glob(search_pattern)
+                    
+                    print(f"[GDPR] Search pattern: {search_pattern}")
+                    print(f"[GDPR] Found {len(matching_files)} matching files")
+                    
+                    for file_path in matching_files:
+                        try:
+                            Path(file_path).unlink()
+                            stats['files_deleted'] += 1
+                            print(f"[GDPR] ✓ Deleted: {file_path}")
+                        except Exception as e:
+                            print(f"[GDPR] ✗ Failed to delete {file_path}: {e}")
+                
+            except json.JSONDecodeError as e:
+                print(f"[GDPR] JSON decode error for message {row['id']}: {e}")
+            except Exception as e:
+                print(f"[GDPR] Error processing message {row['id']}: {e}")
+                import traceback
+                traceback.print_exc()
+
+        print(f"[GDPR] Total files deleted: {stats['files_deleted']}")
+        
+        # STEP 3: TRANSFER ROOM OWNERSHIP OR DELETE EMPTY ROOMS
+        cursor.execute('''
+            SELECT DISTINCT room_id 
+            FROM room_members 
+            WHERE username = ? AND role = 'admin'
+        ''', (username,))
+        
+        admin_rooms = [row['room_id'] for row in cursor.fetchall()]
+        print(f"[GDPR] User is admin of {len(admin_rooms)} rooms")
+        
+        for room_id in admin_rooms:
+            # Get other members
+            cursor.execute('''
+                SELECT username, joined_at 
+                FROM room_members 
+                WHERE room_id = ? AND username != ?
+                ORDER BY joined_at ASC
+            ''', (room_id, username))
+            
+            other_members = cursor.fetchall()
+            
+            if other_members:
+                # Transfer ownership to oldest member
+                new_admin = other_members[0]['username']
+                
+                # Update member role
+                cursor.execute('''
+                    UPDATE room_members 
+                    SET role = 'admin' 
+                    WHERE room_id = ? AND username = ?
+                ''', (room_id, new_admin))
+                
+                # IMPORTANT: Update room creator so hub shows correct owner
+                cursor.execute('''
+                    UPDATE rooms 
+                    SET creator = ? 
+                    WHERE id = ?
+                ''', (new_admin, room_id))
+                
+                stats['rooms_transferred'] += 1
+                print(f"[GDPR] Transferred {room_id} ownership: {username} → {new_admin}")
+            else:
+                # No other members - delete the room entirely
+                print(f"[GDPR] Deleting empty room: {room_id}")
+                
+                # Delete room and cascade deletes messages/reactions
+                cursor.execute('DELETE FROM rooms WHERE id = ?', (room_id,))
+                
+                # Track deleted room for broadcast
+                stats['deleted_rooms'].append(room_id)
+                
+                print(f"[GDPR] ✓ Deleted empty room: {room_id}")
+        
+        # STEP 4: DELETE MESSAGES (not already deleted by room cascade)
+        cursor.execute('DELETE FROM messages WHERE sender = ?', (username,))
+        print(f"[GDPR] Deleted {stats['messages_deleted']} messages")
+        
+        # STEP 5: DELETE REACTIONS
+        cursor.execute('DELETE FROM reactions WHERE username = ?', (username,))
+        print(f"[GDPR] Deleted {stats['reactions_deleted']} reactions")
+        
+        # STEP 6: DELETE MEMBERSHIPS
+        cursor.execute('DELETE FROM room_members WHERE username = ?', (username,))
+        print(f"[GDPR] Deleted {stats['memberships_deleted']} memberships")
+        
+        # STEP 7: DELETE REPORTS
+        cursor.execute('DELETE FROM reports WHERE reporter = ?', (username,))
+        print(f"[GDPR] Deleted {stats['reports_deleted']} reports")
+        
+        conn.commit()
+        print(f"[GDPR] ✓ All data deleted for {username}")
+        return stats
+        
+    except Exception as e:
+        conn.rollback()
+        print(f"[ERROR] GDPR delete failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return stats
+
+def export_user_data_gdpr(username: str) -> dict:
+    """
+    Export ALL data associated with a user (GDPR compliance).
+    
+    This is for GDPR "Right to Access" - user can see all their data.
+    
+    Args:
+        username (str): Username to export data for
+    
+    Returns:
+        dict: All user data in JSON-friendly format
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    data = {
+        'username': username,
+        'export_date': datetime.now().isoformat(),
+        'messages': [],
+        'reactions': [],
+        'room_memberships': [],
+        'reports_filed': []
+    }
+    
+    try:
+        # Get all messages (with encrypted content - we can't decrypt server-side!)
+        cursor.execute('''
+            SELECT m.id, m.room_id, r.name as room_name, m.sender, 
+                   m.encrypted_content, m.timestamp, m.key_version
+            FROM messages m
+            JOIN rooms r ON m.room_id = r.id
+            WHERE m.sender = ? AND m.deleted = 0
+            ORDER BY m.timestamp DESC
+        ''', (username,))
+        
+        for row in cursor.fetchall():
+            data['messages'].append({
+                'message_id': row['id'],
+                'room': row['room_name'],
+                'timestamp': datetime.fromtimestamp(row['timestamp']).isoformat(),
+                'encrypted_content': row['encrypted_content'][:50] + '...',  # Truncated for privacy
+                'note': 'Content is end-to-end encrypted and cannot be decrypted by server'
+            })
+        
+        # Get all reactions
+        cursor.execute('''
+            SELECT r.emoji, m.id as message_id, rm.name as room_name, r.timestamp
+            FROM reactions r
+            JOIN messages m ON r.message_id = m.id
+            JOIN rooms rm ON m.room_id = rm.id
+            WHERE r.username = ?
+            ORDER BY r.timestamp DESC
+        ''', (username,))
+        
+        for row in cursor.fetchall():
+            data['reactions'].append({
+                'emoji': row['emoji'],
+                'room': row['room_name'],
+                'timestamp': datetime.fromtimestamp(row['timestamp']).isoformat()
+            })
+        
+        # Get room memberships
+        cursor.execute('''
+            SELECT rm.room_id, r.name, rm.role, rm.joined_at, rm.first_join_at
+            FROM room_members rm
+            JOIN rooms r ON rm.room_id = r.id
+            WHERE rm.username = ?
+            ORDER BY rm.joined_at DESC
+        ''', (username,))
+        
+        for row in cursor.fetchall():
+            data['room_memberships'].append({
+                'room_name': row['name'],
+                'role': row['role'],
+                'joined_at': datetime.fromtimestamp(row['joined_at']).isoformat(),
+                'first_joined_at': datetime.fromtimestamp(row['first_join_at']).isoformat()
+            })
+        
+        # Get reports filed
+        cursor.execute('''
+            SELECT rep.id, r.name as room_name, rep.reason, rep.details, 
+                   rep.timestamp, rep.status
+            FROM reports rep
+            JOIN rooms r ON rep.room_id = r.id
+            WHERE rep.reporter = ?
+            ORDER BY rep.timestamp DESC
+        ''', (username,))
+        
+        for row in cursor.fetchall():
+            data['reports_filed'].append({
+                'report_id': row['id'],
+                'room': row['room_name'],
+                'reason': row['reason'],
+                'details': row['details'],
+                'timestamp': datetime.fromtimestamp(row['timestamp']).isoformat(),
+                'status': row['status']
+            })
+        
+        return data
+        
+    except Exception as e:
+        print(f"[ERROR] GDPR export failed: {e}")
+        return data
 
 # Initialize database on import
 init_db()

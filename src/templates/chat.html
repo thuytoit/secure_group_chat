@@ -5,6 +5,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/chat.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/dark-mode.css') }}">
 </head>
 <body>
   <div class="chat-header">
@@ -237,7 +238,7 @@
     const TOKEN = '{{ token | safe }}';
     const ROOM_ID = '{{ room_id }}';
     const USERNAME = '{{ username }}';
-    const ROOM_ROLE = '{{ room_role }}';
+    let ROOM_ROLE = '{{ room_role }}';
     const IS_GLOBAL_ADMIN = {{ is_global_admin|tojson }};
     const SALT = '{{ salt }}';
     const ITERATIONS = {{ iterations }};
@@ -624,16 +625,16 @@
             const body = document.createElement('div');
             body.className = 'msg-body';
             
-            // Handle files - always use array format
-            const files = data.files || [];
+            // Use msg.files and text
+            const files = msg.files || [];
             const hasFile = files.length > 0;
             const firstFilename = hasFile ? files[0].filename : null;
-            const isTextSameAsFilename = hasFile && files.length === 1 && data.text === firstFilename;
-            const isMultiFileMarker = data.text && data.text.match(/^\[\d+ files\]$/);
+            const isTextSameAsFilename = hasFile && files.length === 1 && text === firstFilename;
+            const isMultiFileMarker = text && text.match(/^\[\d+ files\]$/);
             
             // Show text only if it's meaningful (not just filename or file marker)
             if (!isTextSameAsFilename && !isMultiFileMarker) {
-              body.textContent = data.text;
+              body.textContent = text;  // Use decrypted text
             }
             
             div.appendChild(body);
@@ -689,7 +690,7 @@
             console.error('❌ Decrypt error for msg', msg.id, ':', e.message);
           }
         });
-        
+
         // Restore scroll position
         container.scrollTop = oldScroll + (container.scrollHeight - oldHeight);
         
@@ -714,7 +715,15 @@
           
           state.groupKey = null;
         }
-        else if (data.type === 'admin_transfer') text = `👑 ${data.msg}`;
+        else if (data.type === 'admin_transfer') {
+          text = `👑 ${data.msg}`;
+          
+          // Check if user became the admin
+          if (data.user === USERNAME) {
+            console.log('🎉 You are now the room admin!');
+            updateAdminButtons('admin');
+          }
+        }
         else if (data.type === 'left') text = data.msg;
         
         addMessage({ text, type: 'sys', timestamp: Date.now() / 1000 });
@@ -853,6 +862,54 @@
         }
       });
 
+      socket.on('user_deleted', (data) => {
+        console.log(`[USER_DELETED] ${data.username} deleted their account`);
+        
+        // Remove all messages from this user
+        Object.keys(messages).forEach(msgId => {
+          const msg = messages[msgId];
+          if (msg.sender === data.username) {
+            const msgEl = messageElements[msgId];
+            if (msgEl) {
+              msgEl.remove();
+            }
+            delete messages[msgId];
+            delete messageElements[msgId];
+          }
+        });
+        
+        // Clean up reactions from this user
+        Object.keys(messages).forEach(msgId => {
+          const msg = messages[msgId];
+          if (msg.reactions) {
+            const updatedReactions = {};
+            for (const [emoji, users] of Object.entries(msg.reactions)) {
+              const filteredUsers = users.filter(u => u !== data.username);
+              if (filteredUsers.length > 0) {
+                updatedReactions[emoji] = filteredUsers;
+              }
+            }
+            
+            messages[msgId].reactions = updatedReactions;
+            
+            const msgEl = messageElements[msgId];
+            if (msgEl) {
+              const reactDiv = msgEl.querySelector('.reactions');
+              if (reactDiv) {
+                updateReactionsUI(reactDiv, updatedReactions, msgId);
+              }
+            }
+          }
+        });
+        
+        // Show system message
+        addMessage({ 
+          text: data.msg,
+          type: 'sys',
+          timestamp: Date.now() / 1000
+        });
+      });
+
       // Socket listener for reaction cleanup when user leaves/kicked
       socket.on('reactions_cleaned', (data) => {
         console.log(`[REACTIONS] Cleaning reactions for ${data.username}`);
@@ -900,6 +957,42 @@
       // ===== END TYPING INDICATOR LISTENER =====
     }
 
+    // ===== HELPER: RENDER FILE ATTACHMENTS =====
+    function renderFileAttachments(files, parentElement) {
+      if (!files || files.length === 0) return;
+      
+      files.forEach(fileData => {
+        const file = document.createElement('div');
+        file.className = 'file-attachment';
+        
+        // Check if it's an image
+        const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(fileData.filename);
+        
+        if (isImage) {
+          // Display image inline
+          file.innerHTML = `
+            <img src="/api/files/${fileData.file_id}" 
+                style="max-width: 300px; max-height: 300px; border-radius: 8px; cursor: pointer;" 
+                onclick="window.open('/api/files/${fileData.file_id}', '_blank')"
+                title="${escapeHtml(fileData.filename)}">
+            <br>
+            <span style="font-size: 11px; color: #999;">${escapeHtml(fileData.filename)} (${formatBytes(fileData.size)})</span>
+          `;
+        } else {
+          // Display as download link
+          file.innerHTML = `
+            📄 <a href="/api/files/${fileData.file_id}" download="${escapeHtml(fileData.filename)}">
+              ${escapeHtml(fileData.filename)}
+            </a>
+            <span style="color: #999;">(${formatBytes(fileData.size)})</span>
+          `;
+        }
+        
+        parentElement.appendChild(file);
+      });
+    }
+    // ===== END HELPER =====
+
     function addMessage(data, skipScroll = false) {
       const isOwn = data.sender === USERNAME;
       const isSystem = data.type === 'sys';
@@ -936,19 +1029,7 @@
       div.appendChild(body);
 
       // DISPLAY ALL ATTACHED FILES
-      if (files.length > 0) {
-        files.forEach(fileData => {
-          const file = document.createElement('div');
-          file.className = 'file-attachment';
-          file.innerHTML = `
-            📄 <a href="/api/files/${fileData.file_id}" download="${escapeHtml(fileData.filename)}">
-              ${escapeHtml(fileData.filename)}
-            </a>
-            <span style="color: #999;">(${formatBytes(fileData.size)})</span>
-          `;
-          body.appendChild(file);
-        });
-      }
+      renderFileAttachments(files, body);
 
       const reactDiv = document.createElement('div');
       reactDiv.className = 'reactions';
@@ -1049,6 +1130,58 @@
         `;
         container.appendChild(div);
       });
+    }
+
+    function updateAdminButtons(newRole) {
+      ROOM_ROLE = newRole;
+      
+      // Get the actions container
+      const actionsDiv = document.querySelector('.chat-header .actions');
+      
+      if (newRole === 'admin' || IS_GLOBAL_ADMIN) {
+        // Show admin buttons if not already visible
+        if (!actionsDiv.querySelector('[onclick="showEditModal()"]')) {
+          // Create admin buttons
+          const editBtn = document.createElement('button');
+          editBtn.className = 'btn btn-light';
+          editBtn.onclick = showEditModal;
+          editBtn.textContent = '✏️ Edit';
+          
+          const switchBtn = document.createElement('button');
+          switchBtn.className = 'btn btn-light';
+          switchBtn.onclick = showSwitchTypeModal;
+          switchBtn.textContent = '🔄 Switch Type';
+          
+          const deleteBtn = document.createElement('button');
+          deleteBtn.className = 'btn btn-danger';
+          deleteBtn.onclick = showDeleteModal;
+          deleteBtn.textContent = '🗑️ Delete Room';
+          
+          const kickBtn = document.createElement('button');
+          kickBtn.className = 'btn btn-light';
+          kickBtn.onclick = showKickModal;
+          kickBtn.textContent = '👢 Kick User';
+          
+          // Insert before Report button
+          const reportBtn = actionsDiv.querySelector('[onclick="showReportModal()"]');
+          actionsDiv.insertBefore(editBtn, reportBtn);
+          actionsDiv.insertBefore(switchBtn, reportBtn);
+          actionsDiv.insertBefore(deleteBtn, reportBtn);
+          actionsDiv.insertBefore(kickBtn, reportBtn);
+          
+          // Also add invite button if private room
+          const roomTypeMatch = document.body.innerHTML.match(/room_type = '(\w+)'/);
+          if (roomTypeMatch && roomTypeMatch[1] === 'private') {
+            const inviteBtn = document.createElement('button');
+            inviteBtn.className = 'btn btn-light';
+            inviteBtn.onclick = showInviteModal;
+            inviteBtn.textContent = '🔗 Show Access';
+            actionsDiv.insertBefore(inviteBtn, switchBtn);
+          }
+          
+          console.log('✅ Admin buttons added to UI');
+        }
+      }
     }
     
     function escapeHtml(text) {
@@ -1777,7 +1910,7 @@
 
     setInterval(checkConnection, 5000);
 
-// ===== ROOM TYPE SWITCHING FUNCTIONS =====
+    // ===== ROOM TYPE SWITCHING FUNCTIONS =====
     
     function showSwitchTypeModal() {
       document.getElementById('switchTypeModal').classList.add('active');
@@ -1872,6 +2005,29 @@
         document.querySelectorAll('.modal').forEach(m => m.classList.remove('active'));
       }
     });
+  </script>
+
+  <!-- Dark Mode Toggle -->
+  <button class="dark-mode-toggle" onclick="toggleDarkMode()" title="Toggle Dark Mode">
+    🌙
+  </button>
+  
+  <script>
+    // Dark mode functionality
+    function toggleDarkMode() {
+      document.body.classList.toggle('dark-mode');
+      
+      if (document.body.classList.contains('dark-mode')) {
+        localStorage.setItem('darkMode', 'enabled');
+      } else {
+        localStorage.setItem('darkMode', 'disabled');
+      }
+    }
+    
+    // Load saved preference
+    if (localStorage.getItem('darkMode') === 'enabled') {
+      document.body.classList.add('dark-mode');
+    }
   </script>
 </body>
 </html>
