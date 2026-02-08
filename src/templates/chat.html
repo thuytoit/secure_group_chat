@@ -250,7 +250,6 @@
     let socket;
     let state = {
       groupKeys: {},
-      userKey: null,
       priv: null,
       keyReady: false,
       currentKeyVersion: -1,
@@ -260,10 +259,49 @@
       connectionAttempts: 0,
       maxConnectionAttempts: 3,
       receivedMessageIds: new Set(),
-      isProcessingKeyRotation: false
+      isProcessingKeyRotation: false,
+      isRequestingKey: false
     };
     let messages = {};
     let messageElements = {};
+
+    // ===== LOCALSTORAGE KEY PERSISTENCE =====
+    function saveKeysToStorage() {
+      try {
+        const keysToSave = {};
+        for (const [version, key] of Object.entries(state.groupKeys)) {
+          keysToSave[version] = key.toString(CryptoJS.enc.Base64);
+        }
+        localStorage.setItem(`room_${ROOM_ID}_keys`, JSON.stringify(keysToSave));
+        localStorage.setItem(`room_${ROOM_ID}_version`, state.currentKeyVersion);
+        console.log(`💾 Saved ${Object.keys(keysToSave).length} keys to localStorage`);
+      } catch (e) {
+        console.error('Failed to save keys:', e);
+      }
+    }
+
+    function loadKeysFromStorage() {
+      try {
+        const saved = localStorage.getItem(`room_${ROOM_ID}_keys`);
+        const savedVersion = localStorage.getItem(`room_${ROOM_ID}_version`);
+        
+        if (saved) {
+          const keysData = JSON.parse(saved);
+          for (const [version, keyBase64] of Object.entries(keysData)) {
+            state.groupKeys[version] = CryptoJS.enc.Base64.parse(keyBase64);
+          }
+          if (savedVersion) {
+            state.currentKeyVersion = parseInt(savedVersion);
+          }
+          console.log(`📂 Loaded ${Object.keys(state.groupKeys).length} keys from localStorage`);
+          return true;
+        }
+      } catch (e) {
+        console.error('Failed to load keys:', e);
+      }
+      return false;
+    }
+    // ===== END LOCALSTORAGE =====
 
     // ===== TYPING INDICATOR STATE =====
     let typingUsers = new Set();
@@ -280,6 +318,35 @@
         exp >>= 1n;
       }
       return result;
+    }
+
+    function deriveP2PKey(dhSharedSecret) {
+      // Convert BigInt shared secret to 32-byte hex string
+      let sharedHex = dhSharedSecret.toString(16);
+      if (sharedHex.length % 2 !== 0) {
+        sharedHex = '0' + sharedHex;
+      }
+      
+      const sharedBytes = [];
+      for (let i = 0; i < sharedHex.length; i += 2) {
+        sharedBytes.push(parseInt(sharedHex.substring(i, i + 2), 16));
+      }
+      
+      const shared32 = new Uint8Array(32);
+      for (let i = 0; i < Math.min(sharedBytes.length, 32); i++) {
+        shared32[i] = sharedBytes[i];
+      }
+      
+      const shared32Hex = Array.from(shared32)
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+      
+      // Derive P2P encryption key with PBKDF2
+      return CryptoJS.PBKDF2(
+        CryptoJS.enc.Hex.parse(shared32Hex),
+        CryptoJS.enc.Utf8.parse(SALT),
+        { keySize: 8, iterations: ITERATIONS, hasher: CryptoJS.algo.SHA256 }
+      );
     }
 
     function updateStatus(msg, isReady = false, isError = false) {
@@ -319,12 +386,12 @@
       }
       
       state.groupKeys = {};
-      state.userKey = null;
       state.keyReady = false;
       state.currentKeyVersion = -1;
       state.connectionAttempts = 0;
       state.receivedMessageIds.clear();
       state.isProcessingKeyRotation = false;
+      state.isRequestingKey = false;
       
       initializeSocket();
     }
@@ -354,6 +421,186 @@
         state.connectionAttempts = 0;
       });
 
+      // ===== TRUE E2EE EVENT HANDLERS - ADD HERE =====
+    
+      socket.on('generate_group_key', (data) => {
+        console.log('[E2EE] 🔑 Server requested CLIENT to generate group key (TRUE E2EE)');
+        
+        // Generate TRUE random 32-byte key
+        const groupKey = CryptoJS.lib.WordArray.random(32);
+        
+        console.log(`[E2EE] ✅ Generated RANDOM group key (${groupKey.sigBytes} bytes)`);
+        console.log('[E2EE] First 8 bytes:', groupKey.toString(CryptoJS.enc.Hex).substring(0, 16));
+        
+        // Store locally
+        state.groupKeys[data.key_version] = groupKey;
+        state.currentKeyVersion = data.key_version;
+        state.keyReady = true;
+
+        // Save to localStorage
+        saveKeysToStorage();
+        
+        // Just tell server we generated the key (no encryption needed)
+        socket.emit('submit_group_key', {
+            key_version: data.key_version
+        });
+        
+        console.log('[E2EE] ✅ Sent ENCRYPTED group key to server');
+        updateStatus(`Ready - TRUE E2EE Chat (v${data.key_version})`, true);
+      });
+
+      socket.on('request_key_share', (data) => {
+        console.log(`[E2EE] 🔄 Request to share key v${data.key_version} with ${data.target_username}`);
+        
+        // Request new user's public key
+        socket.emit('request_user_public_key', {
+          username: data.target_username,
+          sid: data.target_sid,
+          key_version: data.key_version
+        });
+      });
+
+      socket.on('send_public_key_to_peer', (data) => {
+        console.log(`[E2EE] 📤 ${data.requester_username} wants our public key`);
+        
+        // Calculate our current public DH key
+        const clientPub = powMod(g, state.priv, p);
+        const clientPubHex = clientPub.toString(16).padStart(HEX_LEN, '0');
+        
+        // Send to server for relay
+        socket.emit('public_key_for_peer', {
+          requester_sid: data.requester_sid,
+          public_key: clientPubHex,
+          key_version: data.key_version,
+          our_username: USERNAME
+        });
+        
+        console.log('[E2EE] ✅ Sent our public key');
+      });
+
+      socket.on('user_public_key', (data) => {
+        console.log(`[E2EE] 📥 Received ${data.username}'s public key, encrypting group key for them`);
+        
+        try {
+          // Get our group key
+          const groupKey = state.groupKeys[data.key_version];
+          
+          if (!groupKey) {
+            console.error('[E2EE] ❌ Don\'t have key version', data.key_version);
+            
+            // Prevent infinite loop
+            if (state.isRequestingKey) {
+              console.warn('[E2EE] ⚠️ Already requesting key, ignoring');
+              return;
+            }
+            
+            state.isRequestingKey = true;
+            console.log('[E2EE] 🔄 Requesting key from others...');
+            socket.emit('request_key_from_peers', {
+              key_version: data.key_version
+            });
+            
+            // Clear flag after 10 seconds
+            setTimeout(() => {
+              state.isRequestingKey = false;
+              if (!state.groupKeys[data.key_version]) {
+                console.error('[E2EE] ❌ Timeout: Could not get key from peers');
+                addMessage({
+                  text: '⚠️ Could not get encryption key. Please refresh or ask room admin to rejoin.',
+                  type: 'error',
+                  timestamp: Date.now() / 1000
+                });
+              }
+            }, 10000);
+            
+            return;
+          }
+          
+          // Derive shared secret with new user
+          const peerPubInt = BigInt('0x' + data.public_key);
+          const shared = powMod(peerPubInt, state.priv, p);
+          
+          const targetKey = deriveP2PKey(shared);
+          
+          // Encrypt group key with their key
+          const iv = CryptoJS.lib.WordArray.random(16);
+          const encrypted = CryptoJS.AES.encrypt(groupKey, targetKey, {
+            iv: iv,
+            mode: CryptoJS.mode.CBC,
+            padding: CryptoJS.pad.Pkcs7
+          });
+          const combined = iv.clone().concat(encrypted.ciphertext);
+          
+          // Calculate OUR public key to send
+          const ourPub = powMod(g, state.priv, p);
+          const ourPubHex = ourPub.toString(16).padStart(HEX_LEN, '0');
+          
+          // Send to server for relay WITH our public key
+          socket.emit('deliver_shared_key', {
+            target_sid: data.sid,
+            encrypted_key: combined.toString(CryptoJS.enc.Hex),
+            key_version: data.key_version,
+            our_public_key: ourPubHex
+          });
+          
+          console.log(`[E2EE] ✅ Encrypted and sent key for ${data.username}`);
+          
+        } catch (e) {
+          console.error('[E2EE] ❌ Key sharing failed:', e);
+        }
+      });
+
+      socket.on('group_key_from_peer', (data) => {
+        console.log(`[E2EE] 📦 Receiving group key from ${data.sharer_username}`);
+        
+        try {
+          // Compute P2P shared secret with the sharer
+          const sharerPubInt = BigInt('0x' + data.sharer_public_key);
+          const p2pShared = powMod(sharerPubInt, state.priv, p);
+          
+          const p2pKey = deriveP2PKey(p2pShared);
+          
+          // Decrypt group key with P2P key
+          const encHex = data.encrypted_key;
+          const encBytes = CryptoJS.enc.Hex.parse(encHex);
+          const iv = CryptoJS.lib.WordArray.create(encBytes.words.slice(0, 4), 16);
+          const ciphertext = CryptoJS.lib.WordArray.create(
+            encBytes.words.slice(4),
+            encBytes.sigBytes - 16
+          );
+          
+          const groupKey = CryptoJS.AES.decrypt(
+            { ciphertext: ciphertext },
+            p2pKey,  // Use P2P key, not user key!
+            { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+          );
+          
+          // Store the group key
+          state.groupKeys[data.key_version] = groupKey;
+          if (data.key_version > state.currentKeyVersion) {
+            state.currentKeyVersion = data.key_version;
+          }
+          state.keyReady = true;
+
+          // Clear rotation lock if receiving new key
+          state.isProcessingKeyRotation = false;
+
+          // Save to localStorage
+          saveKeysToStorage();
+          
+          console.log(`[E2EE] ✅ Received and decrypted group key v${data.key_version} from ${data.sharer_username}`);
+          updateStatus(`Ready - TRUE E2EE Chat (v${data.key_version})`, true);
+          
+          // Notify server we're ready
+          socket.emit('client_ready');
+          
+        } catch (e) {
+          console.error('[E2EE] ❌ Failed to decrypt key from peer:', e);
+        }
+      });
+
+      // ===== END TRUE E2EE EVENT HANDLERS =====
+
       socket.on('error', (data) => {
         console.error('❌ Socket error:', data);
         addMessage({ text: `ERROR: ${data.msg}`, type: 'error' });
@@ -378,7 +625,7 @@
       });
 
       socket.on('dh_pub', (data) => {
-        console.log('🔑 Received DH public key');
+        console.log('🔑 Received DH public key from server');
         try {
           const serverPub = BigInt('0x' + data.pub);
           
@@ -386,157 +633,59 @@
             throw new Error('Invalid server public key');
           }
           
-          const shared = powMod(serverPub, state.priv, p);
-          
-          let sharedHex = shared.toString(16);
-          
-          if (sharedHex.length % 2 !== 0) {
-            sharedHex = '0' + sharedHex;
-          }
-          
-          const sharedBytes = [];
-          for (let i = 0; i < sharedHex.length; i += 2) {
-            sharedBytes.push(parseInt(sharedHex.substring(i, i + 2), 16));
-          }
-          
-          console.log(`🔑 DH shared secret: ${sharedBytes.length} bytes (raw)`);
-          
-          const shared32 = new Uint8Array(32);
-          for (let i = 0; i < Math.min(sharedBytes.length, 32); i++) {
-            shared32[i] = sharedBytes[i];
-          }
-          
-          console.log(`🔑 DH shared secret: 32 bytes (padded/truncated)`);
-          
-          const shared32Hex = Array.from(shared32)
-            .map(b => b.toString(16).padStart(2, '0'))
-            .join('');
-          
-          console.log(`🔑 Shared secret (first 16 hex): ${shared32Hex.substring(0, 32)}`);
-          console.log(`🔑 Shared secret (full 32 bytes): ${shared32Hex}`);
-          
-          const sharedWordArray = CryptoJS.enc.Hex.parse(shared32Hex);
-          
-          state.userKey = CryptoJS.PBKDF2(
-            sharedWordArray,
-            CryptoJS.enc.Utf8.parse(SALT),
-            { 
-              keySize: 8,
-              iterations: ITERATIONS,
-              hasher: CryptoJS.algo.SHA256
-            }
-          );
-          
-          console.log(`🔑 User key derived: ${state.userKey.sigBytes} bytes`);
-          console.log(`🔑 User key (first 16 hex): ${CryptoJS.enc.Hex.stringify(state.userKey).substring(0, 32)}`);
-          
-          if (!state.userKey || state.userKey.sigBytes !== 32) {
-            throw new Error('User key derivation failed');
-          }
-          
+          // Complete DH handshake by sending our public key
           const clientPub = powMod(g, state.priv, p);
           const clientPubHex = clientPub.toString(16).padStart(HEX_LEN, '0');
           socket.emit('dh_peer', { pub: clientPubHex });
-          updateStatus('Key exchange in progress...');
-          console.log('🔑 Sent DH peer key');
+          
+          updateStatus('Ready for peer-to-peer key exchange...');
+          console.log('🔑 Sent DH peer key to server');
         } catch (e) {
           console.error('❌ DH error:', e);
-          console.error('Stack:', e.stack);
           addMessage({ text: 'Key exchange failed: ' + e.message, type: 'error' });
           updateStatus('Key exchange failed', false, true);
         }
       });
-      
-      socket.on('group_key', (data) => {
-        console.log(`🔑 Received group key v${data.version}, status: ${data.status} [${data.key_index}/${data.total_keys}]`);
+
+      socket.on('check_for_stored_key', (data) => {
+        console.log(`[E2EE] Server asking if we have key v${data.key_version}`);
         
-        if (!state.userKey) {
-          console.error('❌ User key not ready');
-          updateStatus('Key exchange incomplete', false, true);
-          return;
-        }
-        
-        try {
-          const encHex = data.enc;
-          console.log(`🔑 Encrypted key length: ${encHex.length} hex chars (${encHex.length/2} bytes)`);
+        // Check if we have this version in our stored keys
+        if (state.groupKeys[data.key_version]) {
+          console.log(`[E2EE] ✅ We already have key v${data.key_version} from localStorage!`);
+          state.keyReady = true;
+          state.currentKeyVersion = data.key_version;
+          updateStatus(`Ready - TRUE E2EE Chat (v${data.key_version})`, true);
           
-          const encBytes = CryptoJS.enc.Hex.parse(encHex);
-          console.log(`🔑 Encrypted bytes: ${encBytes.sigBytes} bytes`);
+          // Tell server we're ready (no need to request key)
+          socket.emit('client_ready');
+        } else {
+          console.log(`[E2EE] ❌ Don't have key v${data.key_version}, requesting from others`);
           
-          const iv = CryptoJS.lib.WordArray.create(encBytes.words.slice(0, 4), 16);
-          const ciphertext = CryptoJS.lib.WordArray.create(
-            encBytes.words.slice(4), 
-            encBytes.sigBytes - 16
-          );
-          
-          console.log(`🔑 IV: ${iv.sigBytes} bytes, Ciphertext: ${ciphertext.sigBytes} bytes`);
-          
-          const decrypted = CryptoJS.AES.decrypt(
-            { ciphertext: ciphertext },
-            state.userKey,
-            { 
-              iv: iv, 
-              mode: CryptoJS.mode.CBC, 
-              padding: CryptoJS.pad.Pkcs7 
-            }
-          );
-          
-          if (!decrypted || decrypted.sigBytes === 0) {
-            throw new Error('Decryption resulted in empty key');
+          // Prevent infinite loop
+          if (state.isRequestingKey) {
+            console.warn('[E2EE] ⚠️ Already requesting key, ignoring');
+            return;
           }
           
-          console.log(`🔑 Decrypted group key: ${decrypted.sigBytes} bytes`);
+          state.isRequestingKey = true;
           
-          state.groupKeys[data.version] = decrypted;
-          
-          if (data.version > state.currentKeyVersion) {
-            state.currentKeyVersion = data.version;
-          }
-          
-          console.log(`🔑 Stored key v${data.version}, now have versions: ${Object.keys(state.groupKeys).sort((a,b) => a-b).join(', ')}`);
-          
-          if (data.status === 'historical') {
-            console.log(`📚 Stored historical key v${data.version} (${data.key_index}/${data.total_keys})`);
-            
-          } else if (data.status === 'rotated') {
-            console.log(`🔄 Key rotation complete to v${data.version}`);
-            
-            state.isProcessingKeyRotation = false;
-            state.keyReady = true;
-            
-            updateStatus(`Ready - Encrypted Chat (v${data.version})`, true);
-            
-            addMessage({ 
-              text: `🔑 Security key updated to v${data.version}. You can now chat securely.`, 
-              type: 'sys', 
-              timestamp: Date.now() / 1000 
-            });
-            
-            console.log(`✅ Ready with v${data.version}`);
-            
-          } else if (data.status === 'initial') {
-            console.log(`✅ Initial/final key v${data.version} received [${data.key_index}/${data.total_keys}]`);
-            
-            state.keyReady = true;
-            updateStatus(`Ready - Encrypted Chat (v${data.version})`, true);
-            
-            setTimeout(() => {
-              console.log('📢 Notifying server client is ready');
-              socket.emit('client_ready');
-            }, 100);
-          }
-          
-        } catch (e) {
-          console.error('❌ Key decryption error:', e);
-          addMessage({ 
-            text: '❌ Key decryption failed. Please refresh the page.', 
-            type: 'error', 
-            timestamp: Date.now() / 1000 
+          // Request key from someone
+          socket.emit('request_key_from_peers', {
+            key_version: data.key_version
           });
-          updateStatus('Key decryption failed', false, true);
+          
+          // Clear flag after 10 seconds
+          setTimeout(() => {
+            state.isRequestingKey = false;
+            if (!state.groupKeys[data.key_version]) {
+              console.error('[E2EE] ❌ Timeout: Could not get key');
+              updateStatus('Could not get encryption key', false, true);
+            }
+          }, 10000);
         }
       });
-
+    
       socket.on('message_history', (data) => {
         console.log(`📜 Received ${data.messages?.length || 0} history messages`);
         if (!data.messages || !data.messages.length) return;
@@ -694,7 +843,7 @@
         // Restore scroll position
         container.scrollTop = oldScroll + (container.scrollHeight - oldHeight);
         
-        // ⭐ FIXED: Hide button if we loaded fewer than 50 messages OR if oldest message ID is 1
+        // FIXED: Hide button if we loaded fewer than 50 messages OR if oldest message ID is 1
         if (data.messages.length < 50 || state.oldestMessageId === 1) {
           console.log('📜 No more older messages to load');
           loadMoreBtn.style.display = 'none';
@@ -707,13 +856,6 @@
         else if (data.type === 'disconnected') text = `← ${data.user} disconnected`;
         else if (data.type === 'kicked') {
           text = `⊗ ${data.msg}`;
-          
-          console.log('🔄 Kick detected, pausing until new key...');
-          state.isProcessingKeyRotation = true;
-          state.keyReady = false;
-          updateStatus('Key rotation in progress...', false);
-          
-          state.groupKey = null;
         }
         else if (data.type === 'admin_transfer') {
           text = `👑 ${data.msg}`;
@@ -807,6 +949,52 @@
       socket.on('kicked', () => {
         alert('You were kicked from this room');
         window.location = '/hub';
+      });
+
+      socket.on('rotate_group_key', (data) => {
+        console.log(`[KEY_ROTATE] 🔄 Generating new key v${data.new_version} after kicking ${data.kicked_user}`);
+        
+        // Generate new random key
+        const newKey = CryptoJS.lib.WordArray.random(32);
+        
+        // Store it
+        state.groupKeys[data.new_version] = newKey;
+        state.currentKeyVersion = data.new_version;
+        
+        // CRITICAL: Mark as ready immediately
+        state.keyReady = true;
+        state.isProcessingKeyRotation = false;
+
+        // Clear requesting flag (we got the key!)
+        state.isRequestingKey = false;
+        
+        // Save to localStorage
+        saveKeysToStorage();
+        
+        console.log(`[KEY_ROTATE] ✅ Generated new key v${data.new_version}, state.keyReady = true`);
+        
+        // Now share it with all remaining members
+        const members = document.querySelectorAll('.member-item');
+        members.forEach(memberEl => {
+          const nameEl = memberEl.querySelector('.name');
+          if (nameEl) {
+            const memberName = nameEl.textContent.replace(' (You)', '').trim();
+            if (memberName !== USERNAME && memberName !== data.kicked_user) {
+              // Request this member's public key to share new key
+              socket.emit('request_key_share_for_rotation', {
+                target_username: memberName,
+                key_version: data.new_version
+              });
+            }
+          }
+        });
+        
+        updateStatus(`Ready - TRUE E2EE Chat (v${data.new_version})`, true);
+        addMessage({ 
+          text: `🔑 Security key rotated to v${data.new_version} after kicking ${data.kicked_user}`, 
+          type: 'sys', 
+          timestamp: Date.now() / 1000 
+        });
       });
 
       socket.on('room_left', () => {
@@ -1202,24 +1390,10 @@
           throw new Error('Encrypted data too short or empty');
         }
         
-        let key = state.groupKeys[msgKeyVersion];
-        
-        if (!key) {
-          console.warn(`⚠️ Don't have key v${msgKeyVersion}, trying current v${state.currentKeyVersion}`);
-          key = state.groupKeys[state.currentKeyVersion];
-        }
-        
-        if (!key) {
-          const availableVersions = Object.keys(state.groupKeys);
-          if (availableVersions.length > 0) {
-            const fallbackVersion = availableVersions[availableVersions.length - 1];
-            console.warn(`⚠️ Using fallback key v${fallbackVersion}`);
-            key = state.groupKeys[fallbackVersion];
-          }
-        }
-        
+        const key = state.groupKeys[msgKeyVersion];
+
         if (!key || key.sigBytes === 0) {
-          throw new Error(`No valid key available (needed v${msgKeyVersion}, have: ${Object.keys(state.groupKeys).join(', ')})`);
+          throw new Error(`Missing key v${msgKeyVersion} (have: ${Object.keys(state.groupKeys).join(', ')})`);
         }
         
         const allBytes = CryptoJS.enc.Hex.parse(encHex);
@@ -1300,6 +1474,12 @@
         Math.floor(Math.random() * 256).toString(16).padStart(2, '0')
       ).join('');
       state.priv = BigInt('0x' + priv_hex);
+
+      // Try to load keys from storage
+      const hasStoredKeys = loadKeysFromStorage();
+      if (hasStoredKeys) {
+        console.log('✅ Recovered keys from previous session');
+      }
       
       const input = document.getElementById('msg-input');
       
@@ -1401,16 +1581,6 @@
           timestamp: Date.now() / 1000
         });
         reconnect();
-        return;
-      }
-      
-      if (!state.userKey) {
-        console.error('❌ Cannot send: No user key');
-        addMessage({
-          text: '⚠️ Encryption not initialized. Please wait or refresh.',
-          type: 'error',
-          timestamp: Date.now() / 1000
-        });
         return;
       }
       
@@ -1612,10 +1782,11 @@
       updateFilePreview();
     }
     
+    const ALLOWED_FILE_TYPES = ['txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx', 'zip', 'mp4', 'mp3'];
+
     function allowed_file(filename) {
       const ext = filename.split('.').pop().toLowerCase();
-      const allowed = ['txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx', 'zip', 'mp4', 'mp3'];
-      return allowed.includes(ext);
+      return ALLOWED_FILE_TYPES.includes(ext);
     }
 
     function toggleReaction(msgId, emoji) {

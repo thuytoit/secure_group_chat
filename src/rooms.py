@@ -15,34 +15,70 @@ from users import is_admin as is_global_admin, load_users, save_users, get_usern
 room_keys = {}  # {room_id: {'key': bytes, 'version': int}}
 
 def generate_room_id(name: str) -> str:
-    """Generate unique room ID"""
+    """
+    Generate a unique room identifier from name and random token.
+    
+    Creates a URL-safe room ID by combining a random hex token with a
+    sanitized version of the room name. Format: room_{token}_{sanitized_name}
+    
+    Args:
+        name (str): Room name to incorporate into ID
+    
+    Returns:
+        str: Unique room ID (e.g., "room_a3f9c2d8_general_chat")
+    
+    Example:
+        generate_room_id("General Chat")
+        'room_a3f9c2d8_general_chat'
+    
+    Note:
+        The random token ensures uniqueness even if room names are reused
+        after deletion. Name is truncated to 20 chars and sanitized.
+    """
     return f"room_{secrets.token_hex(8)}_{name[:20].replace(' ', '_').lower()}"
 
 def generate_invite_code() -> str:
-    """Generate random invite code for private rooms"""
+    """
+    Generate a cryptographically secure invite code for private rooms.
+    
+    Creates a URL-safe random string suitable for sharing via links or
+    direct paste. Uses secrets module for cryptographic randomness.
+    
+    Returns:
+        str: 16-byte URL-safe invite code (e.g., "vK3m9XpL2wQ-TyNf")
+    
+    Note:
+        Each private room gets a unique code that can be regenerated if
+        compromised. Code is stored in database and required for access.
+    """
     return secrets.token_urlsafe(16)
 
 class RoomManager:
     """
-    Manage chat room lifecycle, encryption keys, and access control.
+    Central manager for chat room operations and encryption key lifecycle.
     
-    This class handles all room-related operations including creation, joining,
-    leaving, and deletion. It also manages the critical encryption key lifecycle:
-    - Key generation using deterministic derivation
-    - Key rotation when users are removed (kicked)
-    - Key distribution to authorized members
+    This class handles all room-related operations with TRUE end-to-end encryption:
+    - Room creation with client-side key generation
+    - Member joining with peer-to-peer key distribution  
+    - Voluntary leaving with admin succession
+    - Forced removal (kicking) with client-side key rotation
+    - Room deletion with memory cleanup
+    - Access control for public and private rooms
     
-    The RoomManager maintains an in-memory store of active room keys that is
-    never persisted to disk, ensuring true end-to-end encryption where the
-    server cannot decrypt messages without active user connections.
+    The RoomManager maintains ZERO plaintext encryption keys. It only tracks:
+    - Key version numbers (which key is current)
+    - Who generated each key (for finding key sharers)
+    - Encrypted key blobs (which it cannot decrypt)
+    
+    This ensures true end-to-end encryption where even server administrators
+    cannot decrypt message content.
     
     Attributes:
-        This class primarily interacts with the database module and maintains
-        no persistent state beyond the database.
+        None (uses global room_keys dict and database for persistence)
     
     Note:
-        Room keys are stored in the global room_keys dict as:
-        {room_id: {'key': bytes, 'version': int}}
+        Designed as a singleton - use the global room_manager instance
+        rather than creating new instances.
     """
     def __init__(self):
         """
@@ -50,10 +86,7 @@ class RoomManager:
         
         Currently performs no initialization as room keys are stored in the
         global room_keys dict and room data is persisted in the database.
-        
-        Note:
-            This class is designed as a singleton accessed via the global
-            room_manager instance at module level.
+        This design allows the manager to be stateless and thread-safe.
         """
         pass
     
@@ -61,28 +94,28 @@ class RoomManager:
                 password: Optional[str] = None, description: str = '',
                 max_members: int = 50) -> Tuple[bool, Optional[str], str]:
         """
-        Create a new chat room with deterministic encryption key.
+        Create a new chat room with TRUE client-side encryption.
         
-        Generates a unique room ID, creates database records, and derives the
-        initial encryption key (version 0) deterministically from the room ID.
-        For private rooms, generates invite codes and optionally hashes passwords.
+        Generates a unique room ID, creates database records, and prepares for
+        client-side key generation. For private rooms, generates invite codes
+        and optionally hashes passwords.
         
         Args:
-            name (str): Room name (max 50 chars, must be unique)
+            name (str): Room name (max 50 chars, must be unique system-wide)
             creator (str): Username of room creator (becomes admin)
             room_type (str): 'public' or 'private'. Defaults to 'public'
-            password (str, optional): Plain-text password for private rooms
-            description (str): Room description. Defaults to empty
-            max_members (int): Max capacity. Defaults to 50
+            password (str, optional): Plain-text password for private rooms.
+                                     Will be hashed with bcrypt before storage.
+            description (str): Room description/topic. Defaults to empty string.
+            max_members (int): Maximum capacity. Defaults to 50, max 500.
         
         Returns:
             tuple: (success: bool, room_id: str or None, message: str)
-                - (True, room_id, "Room 'name' created") on success
-                - (False, None, error_message) on failure
+                Success case: (True, room_id, "Room 'name' created")
+                Failure case: (False, None, error_message)
         
-        Note:
-            The deterministic key derivation ensures the same room always gets
-            the same initial key, enabling key recovery after server restarts.
+        Raises:
+            None: All errors returned as (False, None, error_message)
         """
         if not name or len(name) > 50:
             return False, None, "Invalid room name"
@@ -109,56 +142,13 @@ class RoomManager:
             description=description,
             max_members=max_members
         )
-        
+
         if not success:
             return False, None, "Room name already exists"
-        
-        # CRITICAL FIX: Generate deterministic key from room_id
-        # This ensures the same key is always generated for the same room
-        initial_key = self._derive_room_key(room_id, version=0)
-        
-        room_keys[room_id] = {
-            'key': initial_key,
-            'version': 0
-        }
-        
-        print(f"[KEY_INIT] Created room {room_id} with deterministic key v0")
-        
-        return True, room_id, f"Room '{name}' created"
 
-    def _derive_room_key(self, room_id: str, version: int) -> bytes:
-        """
-        Derive a deterministic 32-byte encryption key from room ID and version.
-        
-        Uses repeated SHA256 hashing (10,000 iterations) to derive a secure key
-        that is always the same for a given room_id and version. This enables:
-        - Key recovery after server restart
-        - Historical key regeneration for message decryption
-        - Predictable key rotation
-        
-        Args:
-            room_id (str): Unique room identifier
-            version (int): Key version number (0, 1, 2, ...)
-        
-        Returns:
-            bytes: 32-byte encryption key
-        
-        Note:
-            This is the CORE of the key management system. The deterministic
-            nature means we can always recreate any key version if we know
-            the room_id and version number.
-        """
-        import hashlib
-        
-        # Use HKDF-style derivation
-        material = f"{room_id}:v{version}:groupkey".encode()
-        
-        # Use multiple hash rounds for key stretching
-        key = hashlib.sha256(material).digest()
-        for _ in range(10000):  # 10k rounds
-            key = hashlib.sha256(key).digest()
-        
-        return key
+        print(f"[E2EE] Room {room_id} created - waiting for client key generation")
+
+        return True, room_id, f"Room '{name}' created"
 
     def join_room(self, room_id: str, username: str, password: Optional[str] = None,
                  invite_code: Optional[str] = None) -> Tuple[bool, Optional[str], str]:
@@ -167,7 +157,7 @@ class RoomManager:
         
         Verifies user authorization (invite codes and passwords for private rooms),
         checks room capacity, and adds the user as a member. Ensures the room's
-        encryption key exists in memory or regenerates it deterministically.
+        encryption key version is tracked in memory.
         
         Args:
             room_id (str): Room to join
@@ -284,28 +274,31 @@ class RoomManager:
     
     def kick_user(self, room_id: str, kicker_token: str, target_username: str) -> Tuple[bool, Optional[bytes], str]:
         """
-        Remove a user from a room and rotate the encryption key.
+        Remove a user from a room forcibly (TRUE E2EE - client-side key rotation).
         
-        Only room admins or global admins can kick users. After removal, generates
-        a new encryption key (version N+1) deterministically and returns it for
-        distribution to remaining members. This ensures the kicked user cannot
-        decrypt future messages (forward secrecy).
+        In TRUE end-to-end encryption, key rotation happens CLIENT-SIDE:
+        - Server removes the user from membership
+        - Server increments key version number
+        - Server signals clients to rotate (generate new random key)
+        - Clients share new key peer-to-peer
+        - Server NEVER generates or sees the new key
+        
+        Only room admins or global admins can kick users.
         
         Args:
             room_id (str): Room to kick user from
-            kicker_token (str): Session token of user performing kick (for auth)
+            kicker_token (str): Session token of admin performing kick
             target_username (str): Username to remove
         
         Returns:
-            tuple: (success: bool, new_key: bytes or None, message: str)
-                - (True, new_key, "Kicked X, key rotated to vN") on success
-                - (False, None, error_message) on failure
-        
-        Note:
-            CRITICAL SECURITY FEATURE: The key rotation prevents removed users
-            from accessing future communications, implementing forward secrecy
-            in group messaging.
+            tuple: (success: bool, None (always None in TRUE E2EE), message: str)
+                Success: (True, None, "Kicked {user}, key rotating to v{new}")
+                Not authorized: (False, None, "Not authorized")
+                Can't kick self: (False, None, "Cannot kick yourself")
+                Not in room: (False, None, "User not in room")
         """
+        from users import get_username_from_token, is_admin as is_global_admin
+        
         kicker = get_username_from_token(kicker_token)
         if not kicker:
             return False, None, "Invalid session"
@@ -333,64 +326,40 @@ class RoomManager:
         
         new_version = current_version + 1
         
-        # CRITICAL FIX: Generate deterministic new key
-        new_key = self._derive_room_key(room_id, new_version)
-        
+        # TRUE E2EE: Don't generate key on server!
+        # Just update version number
         room_keys[room_id] = {
-            'key': new_key,
-            'version': new_version
+            'encrypted_key': None,  # Clients will handle this
+            'version': new_version,
+            'generator': kicker  # Who initiated the rotation
         }
         
         db.update_room_key_version(room_id, new_version)
         
-        print(f"[KEY_ROTATE] Room {room_id} key rotated: v{current_version} → v{new_version} (deterministic)")
+        print(f"[KEY_ROTATE] Room {room_id} key will be rotated: v{current_version} → v{new_version} (client-side)")
         
-        return True, new_key, f"Kicked {target_username}, key rotated to v{new_version}"
+        return True, None, f"Kicked {target_username}, key rotating to v{new_version}"
 
     def get_room_key(self, room_id: str) -> Tuple[Optional[bytes], int]:
         """
-        Get current room encryption key, regenerating deterministically if needed.
+        Get current room key version (TRUE E2EE version).
         
-        Returns the active encryption key and version for a room. If the key isn't
-        in memory (server restart), regenerates it deterministically using the
-        version number stored in the database.
-        
-        Args:
-            room_id (str): Room to get key for
-        
-        Returns:
-            tuple: (key: bytes or None, version: int)
-                - (key, version) if room exists
-                - (None, 0) if room not found
-        
-        Note:
-            This function enables stateless server operation - keys can always
-            be recreated from room_id + version, allowing for server restarts
-            without losing encryption capability.
+        NOTE: Server doesn't have plaintext keys in TRUE E2EE!
+        This returns (None, version) to indicate key exists but is encrypted.
         """
         
         # Check memory first
         if room_id in room_keys:
-            return room_keys[room_id]['key'], room_keys[room_id]['version']
+            return None, room_keys[room_id]['version']  # Server doesn't have plaintext!
         
-        # Not in memory - get version from database
+        # Not in memory - check database
         room = db.get_room(room_id)
         if not room:
             print(f"[KEY] Room {room_id} not found in database")
             return None, 0
         
         version = room.get('key_version', 0)
-        
-        # CRITICAL FIX: Regenerate the SAME deterministic key
-        print(f"[KEY] Regenerating deterministic key v{version} for {room_id}")
-        key = self._derive_room_key(room_id, version)
-        
-        room_keys[room_id] = {
-            'key': key,
-            'version': version
-        }
-        
-        return key, version
+        return None, version
 
     def delete_room(self, room_id: str, token: str) -> Tuple[bool, str]:
         """

@@ -5,7 +5,7 @@ This Flask application implements an end-to-end encrypted chat system with:
 - User authentication and session management
 - Multiple chat rooms (public and private)
 - Real-time messaging via Socket.IO
-- Diffie-Hellman key exchange for secure key distribution
+- Diffie-Hellman key exchange for peer-to-peer key sharing (client-to-client)
 - AES-256-CBC encryption for all message content
 - Dynamic key rotation on user removal
 - Multiple file attachments per message
@@ -43,7 +43,7 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.utils import secure_filename
 from users import register, login, is_admin as is_global_admin, logout, load_users, get_username_from_token
 import bcrypt
-from rooms import room_manager
+from rooms import room_manager, room_keys
 import database as db
 from crypto import parameters, derive_key, encrypt_message
 from cryptography.hazmat.primitives.asymmetric import dh
@@ -79,9 +79,6 @@ backend = default_backend()
 # Key management locks
 key_locks = {}
 connection_locks = threading.Lock()
-
-# Thread pool for crypto operations
-key_executor = ThreadPoolExecutor(max_workers=10)
 
 def cleanup():
     """
@@ -223,170 +220,7 @@ def get_room_lock(room_id: str):
         if room_id not in key_locks:
             key_locks[room_id] = threading.Lock()
         return key_locks[room_id]
-
-def send_group_key_to_user(sid: str, room_id: str, username: str, status: str = 'initial'):
-    """
-    Encrypt and send room encryption key(s) to a single user.
-    
-    Handles both initial joins and reconnections. For reconnecting users,
-    sends ALL historical key versions needed to decrypt message history.
-    Encrypts each key with the user's personal key before transmission.
-    
-    Args:
-        sid (str): Socket ID of the user
-        room_id (str): Room they're joining
-        username (str): Username for logging
-        status (str): 'initial', 'historical', or 'rotated'
-    
-    Returns:
-        bool: True if successful, False on error
-    
-    Note:
-        CRITICAL for security: Multiple key versions enable users who stayed
-        through key rotations to decrypt both old and new messages.
-    """
-    if sid not in connections:
-        logger.error(f"[KEY] Socket {sid} not found in connections")
-        return False
-    
-    conn = connections[sid]
-    
-    if not conn.get('user_key'):
-        logger.error(f"[KEY] No user key for {username}")
-        return False
-    
-    try:
-        # Get current room key
-        room_lock = get_room_lock(room_id)
-        with room_lock:
-            current_key, current_version = room_manager.get_room_key(room_id)
-            if not current_key:
-                logger.error(f"[KEY] No room key for {room_id}")
-                return False
-            
-            # Check if user needs historical keys (reconnection after key rotation)
-            members = db.get_room_members(room_id)
-            user_member = next((m for m in members if m['username'] == username), None)
-            
-            needed_versions = set()
-            
-            if user_member and status == 'initial':
-                # Get all messages since user's first join to find needed key versions
-                first_join = user_member['first_join_at']
-                messages = db.get_messages_after_timestamp(room_id, first_join, limit=1000)
-                
-                for msg in messages:
-                    needed_versions.add(msg['key_version'])
-                
-                # Also include current version
-                needed_versions.add(current_version)
-                
-                logger.info(f"[KEY] {username} needs key versions: {sorted(needed_versions)} for history since {first_join}")
-            else:
-                # New join or key rotation - just send current key
-                needed_versions.add(current_version)
-            
-            # Send all needed keys
-            keys_to_send = sorted(needed_versions)
-            
-            for idx, version in enumerate(keys_to_send):
-                # Regenerate historical key deterministically
-                key_to_send = room_manager._derive_room_key(room_id, version)
-                
-                # Encrypt with user's key
-                enc_data = encrypt_message(key_to_send, conn['user_key'])
-                
-                # Determine status for this key
-                is_last = (idx == len(keys_to_send) - 1)
-                
-                if len(keys_to_send) == 1:
-                    # Only one key - use the original status
-                    key_status = status
-                elif is_last:
-                    # Last key in batch - use 'initial' so client becomes ready
-                    key_status = 'initial'
-                else:
-                    # Historical key - client will store but not become ready yet
-                    key_status = 'historical'
-                
-                # Send this key version
-                socketio.emit('group_key', {
-                    'enc': enc_data.hex(),
-                    'version': version,
-                    'status': key_status,
-                    'total_keys': len(keys_to_send),  # NEW: Tell client how many keys to expect
-                    'key_index': idx + 1  # NEW: Tell client which key this is (1-based)
-                }, to=sid)
-                
-                logger.info(f"[KEY] ✓ Sent v{version} ({key_status}) to {username} [{idx+1}/{len(keys_to_send)}]")
-            
-            return True
-        
-    except Exception as e:
-        logger.error(f"[KEY] Failed to send key to {username}: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-                
-def distribute_new_key_after_kick(room_id: str, new_key: bytes, new_version: int):
-    """
-    Send rotated encryption key to all remaining room members.
-    
-    After a user is kicked, distributes the new key (version N+1) to everyone
-    still in the room. Encrypts the key with each user's personal key.
-    
-    Args:
-        room_id (str): Room that had key rotation
-        new_key (bytes): New 32-byte encryption key
-        new_version (int): New version number
-    
-    Note:
-        This implements forward secrecy - kicked users can't decrypt future
-        messages even if they captured encrypted traffic.
-    """
-    room_lock = get_room_lock(room_id)
-    
-    with room_lock:
-        logger.info(f"[KEY_ROTATION] Starting distribution of v{new_version} for {room_id}")
-        
-        current_sids = room_sids.get(room_id, []).copy()
-        
-        logger.info(f"[KEY_ROTATION] Found {len(current_sids)} connections in room")
-        
-        if not current_sids:
-            logger.warning(f"[KEY_ROTATION] No connections to re-key in {room_id}")
-            return
-        
-        # CRITICAL: We need to send ALL key versions, not just the new one
-        # Get all previous versions from room_keys history
-        
-        successful = 0
-        for sid in current_sids:
-            if sid not in connections:
-                continue
-                
-            conn = connections[sid]
-            if not conn.get('user_key'):
-                continue
-            
-            try:
-                # Send the new key with 'rotated' status
-                enc_data = encrypt_message(new_key, conn['user_key'])
-                socketio.emit('group_key', {
-                    'enc': enc_data.hex(),
-                    'version': new_version,
-                    'status': 'rotated'
-                }, to=sid)
-                successful += 1
-                logger.info(f"[KEY_ROTATION] Sent v{new_version} to {conn['username']}")
-                
-                connections[sid]['key_version'] = new_version
-                    
-            except Exception as e:
-                logger.error(f"[KEY_ROTATION] Failed to send to {conn.get('username')}: {e}")
-        
-        logger.info(f"[KEY_ROTATION] Completed: {successful}/{len(current_sids)} successful")
-
+                            
 def check_connection_health():
     """
     Background thread that monitors and cleans up stale connections.
@@ -1322,7 +1156,6 @@ def handle_connect(auth):
         'username': username,
         'token': token,
         'room_id': room_id,
-        'user_key': None,
         'priv_key': None,
         'ready': False,
         'key_version': -1,
@@ -1361,20 +1194,23 @@ def handle_connect(auth):
 @socketio.on('dh_peer')
 def handle_dh_peer(data):
     """
-    Receive client's DH public key and complete key exchange.
+    Complete DH handshake with client (prepares for P2P key sharing).
     
-    Takes client's public key, performs DH calculation to derive shared secret,
-    runs PBKDF2 to create user key, then sends encrypted group key.
+    The client sends their DH public key to complete the exchange. This
+    establishes that the client has generated their DH keypair, which they'll
+    later use for peer-to-peer key sharing with other members.
+    
+    Note: The server does NOT need to derive or store any keys from this
+    exchange. The client's DH private key is used exclusively for P2P
+    encryption between clients, not for client-server communication.
     
     Data:
         pub (str): Client's DH public key as hex string
     
     Emits:
-        'error' on failure
-        Calls send_group_key_to_user() on success
-    
-    Note:
-        This completes the cryptographic handshake, enabling encrypted messaging.
+        'generate_group_key': If user is first member (tells them to create key)
+        'check_for_stored_key': If user is joining existing room (checks localStorage)
+        'error': If DH validation fails
     """
     sid = request.sid
     if sid not in connections:
@@ -1382,14 +1218,12 @@ def handle_dh_peer(data):
         return
     
     try:
-        priv_key = connections[sid]['priv_key']
-        if not priv_key:
-            raise ValueError('No private key')
-        
+        # Verify client sent valid DH public key
         pub_hex = data.get('pub', '')
         if not pub_hex:
             raise ValueError('No public key received')
         
+        # Basic validation only
         peer_pub_bytes = bytes.fromhex(pub_hex)
         param_nums = parameters.parameter_numbers()
         p = param_nums.p
@@ -1398,65 +1232,36 @@ def handle_dh_peer(data):
         if not (1 < peer_pub_int < p):
             raise ValueError('Invalid public key range')
         
-        peer_pub_num = dh.DHPublicNumbers(peer_pub_int, param_nums)
-        peer_pub_key = peer_pub_num.public_key(backend)
+        # Mark as ready (client has completed DH setup for P2P)
+        connections[sid]['priv_key'] = None  # Clear server's temp key
+        connections[sid]['ready'] = True
         
-        # Perform DH exchange
-        shared = priv_key.exchange(peer_pub_key)
+        logger.info(f"[DH] Client {sid} ready for P2P key sharing")
         
-        logger.info(f"[DH] Raw shared secret: {len(shared)} bytes")
-        logger.info(f"[DH] Shared secret (first 16 hex): {shared[:8].hex()}")
-        
-        # Pad/truncate to 32 bytes (matching JavaScript)
-        shared_padded = shared.ljust(32, b'\x00')[:32]
-        
-        logger.info(f"[DH] Padded shared secret (first 16 hex): {shared_padded[:8].hex()}")
-        logger.info(f"[DH] Padded shared secret (full 32 bytes hex): {shared_padded.hex()}")
-        
-        # Derive user key
-        user_key = derive_key(shared_padded)
-        
-        logger.info(f"[DH] User key: {len(user_key)} bytes")
-        logger.info(f"[DH] User key (first 16 hex): {user_key[:8].hex()}")  # Changed from 8 to 16 hex chars
-        
-        # Validate key
-        if len(user_key) != 32:
-            raise ValueError(f'Invalid user key length: {len(user_key)}')
-        
-        connections[sid]['user_key'] = user_key
-        connections[sid]['priv_key'] = None
-        
-        logger.info(f"[DH] Exchange complete for {sid}")
-        
-        # Send group key immediately
+        # Determine next step
         room_id = connections[sid]['room_id']
         username = connections[sid]['username']
-        
-        if send_group_key_to_user(sid, room_id, username, 'initial'):
-            logger.info(f"[DH] Group key sent to {username}")
+        members = db.get_room_members(room_id)
+
+        if len(members) == 1 and members[0]['username'] == username:
+            # First member - generate key client-side
+            logger.info(f"[E2EE] {username} is FIRST - requesting client key generation")
+            emit('generate_group_key', {'room_id': room_id, 'key_version': 0})
         else:
-            emit('error', {'msg': 'Failed to initialize encryption'})
+            # Not first - check if they have key in localStorage
+            logger.info(f"[E2EE] {username} joining existing room - checking if they have key")
+            emit('check_for_stored_key', {
+                'room_id': room_id,
+                'key_version': room_keys.get(room_id, {}).get('version', 0)
+            })
             
     except Exception as e:
         logger.error(f"[DH] Failed for {sid}: {e}")
-        import traceback
-        traceback.print_exc()
         emit('error', {'msg': f'Key exchange failed: {str(e)}'})
-                                    
+                                           
 @socketio.on('client_ready')
 def handle_client_ready():
-    """
-    Client confirms key processing complete and ready for messaging.
-    
-    Triggered after client decrypts and validates group key. Sends join
-    notification to room, broadcasts updated member list, and delivers
-    message history to the newly-ready client.
-    
-    Emits:
-        'sys_msg' (join notification)
-        'member_list_update'
-        'message_history'
-    """
+    """Client confirms ready after receiving initial key"""
     sid = request.sid
     if sid not in connections:
         return
@@ -1464,35 +1269,18 @@ def handle_client_ready():
     username = connections[sid]['username']
     room_id = connections[sid]['room_id']
     
-    connections[sid]['ready'] = True
-    logger.info(f"[READY] {username} is ready in {room_id}")
-    
-    # Send join notification to others FIRST
+    # Broadcast join message
     emit('sys_msg', {'type': 'joined', 'user': username}, to=room_id, include_self=False, broadcast=True)
-    
-    # Update member list
     broadcast_member_update(room_id)
     
-    # Send message history
+    # Send history
     try:
         members = db.get_room_members(room_id)
         user_member = next((m for m in members if m['username'] == username), None)
-        
         if user_member:
-            # CRITICAL FIX: Use first_join_at (not joined_at) so continuing members see full history
             first_join = user_member['first_join_at']
-            
-            # Get the current key version
             _, key_version = room_manager.get_room_key(room_id)
-            
-            # Get ALL messages since first join
             messages = db.get_messages_after_timestamp(room_id, first_join, limit=51)
-            
-            # CRITICAL FIX: Don't filter by key version!
-            # Users who stayed through key rotation can decrypt both old and new keys
-            # Only send messages from their first join onwards
-            
-            logger.info(f"[HISTORY] Found {len(messages)} messages since first_join_at={first_join}")
             
             emit('message_history', {
                 'messages': [{
@@ -1506,11 +1294,225 @@ def handle_client_ready():
                 } for msg in messages],
                 'current_key_version': key_version
             })
-            logger.info(f"[HISTORY] Sent {len(messages)} messages to {username}")
     except Exception as e:
         logger.error(f"[HISTORY] Failed: {e}")
-        import traceback
-        traceback.print_exc()
+
+@socketio.on('submit_group_key')
+def handle_submit_group_key(data):
+    """
+    Receive and store client-generated encryption key (TRUE E2EE).
+    
+    This is called when a client generates a new room encryption key and sends
+    it back to the server. In TRUE end-to-end encryption, the server receives
+    the key ENCRYPTED with the user's personal key (derived from DH exchange),
+    so the server cannot decrypt it.
+    
+    The server stores:
+    - Encrypted key blob (which it cannot decrypt)
+    - Key version number
+    - Generator username (for finding key sharers later)
+    
+    Socket Event Data:
+        encrypted_key (str): Hex-encoded encrypted group key (encrypted with user key)
+        key_version (int): Key version number (typically 0 for first key)
+    
+    Emits:
+        'sys_msg': Join notification to all room members
+        'message_history': Empty history array (first member has no history)
+    
+    Side Effects:
+        - Updates room_keys dict in memory
+        - Updates key_version in database
+        - Broadcasts member list update
+    
+    Note:
+        This is the FIRST step in client-side key generation. The client will
+        then share this key with other members using peer-to-peer DH encryption.
+    """
+    sid = request.sid
+    if sid not in connections:
+        return
+    
+    username = connections[sid]['username']
+    room_id = connections[sid]['room_id']
+    key_version = data.get('key_version', 0)
+    
+    room_lock = get_room_lock(room_id)
+    with room_lock:
+        room_keys[room_id] = {
+            'version': key_version,
+            'generator': username
+        }
+        db.update_room_key_version(room_id, key_version)
+    
+    emit('sys_msg', {'type': 'joined', 'user': username}, to=room_id, include_self=True, broadcast=True)
+    broadcast_member_update(room_id)
+    emit('message_history', {'messages': [], 'current_key_version': key_version})
+
+@socketio.on('request_user_public_key')
+def handle_request_user_public_key(data):
+    """
+    Request a user's DH public key for peer-to-peer key sharing.
+    
+    When a user needs to share the group encryption key with another member,
+    they first need that member's DH public key to encrypt the key. This
+    handler relays the request to the target user.
+    
+    This is part of the peer-to-peer key distribution protocol:
+    1. Key sharer requests target's public key (THIS HANDLER)
+    2. Target sends their public key back
+    3. Sharer encrypts group key with shared secret
+    4. Sharer sends encrypted group key to target
+    
+    Socket Event Data:
+        sid (str): Target user's socket ID
+        key_version (int): Which key version to share
+    
+    Emits:
+        'send_public_key_to_peer': Request to target user to send their public key
+    
+    Note:
+        This ensures end-to-end encryption - the server never sees the plaintext
+        group key, only encrypted blobs passing between peers.
+    """
+    target_sid = data.get('sid')
+    requester_sid = request.sid
+    key_version = data.get('key_version')
+    requester_name = connections[requester_sid]['username']
+    
+    socketio.emit('send_public_key_to_peer', {
+        'requester_sid': requester_sid,
+        'requester_username': requester_name,
+        'key_version': key_version
+    }, to=target_sid)
+
+@socketio.on('public_key_for_peer')
+def handle_public_key_for_peer(data):
+    """
+    Relay a user's DH public key back to the key sharer.
+    
+    After receiving a public key request (from handle_request_user_public_key),
+    the target user sends their DH public key. This handler relays it back to
+    the original requester (key sharer).
+    
+    This is step 2 of the peer-to-peer key sharing protocol.
+    
+    Socket Event Data:
+        requester_sid (str): Socket ID of user who needs the public key
+        public_key (str): DH public key as hex string
+        key_version (int): Key version being shared
+    
+    Emits:
+        'user_public_key': Sends public key to the original requester
+    
+    Note:
+        The server is just a relay here - it doesn't perform any crypto operations
+        on the public key, just passes it along.
+    """
+    sender_sid = request.sid
+    sender_name = connections[sender_sid]['username']
+    requester_sid = data.get('requester_sid')
+    
+    socketio.emit('user_public_key', {
+        'username': sender_name,
+        'sid': sender_sid,
+        'public_key': data.get('public_key'),
+        'key_version': data.get('key_version')
+    }, to=requester_sid)
+
+@socketio.on('deliver_shared_key')
+def handle_deliver_shared_key(data):
+    """
+    Relay encrypted group key from sharer to recipient.
+    
+    After the key sharer receives the target's public key and encrypts the
+    group key with their shared DH secret, this handler relays the encrypted
+    key to the recipient.
+    
+    This is the final step (step 4) of peer-to-peer key sharing.
+    
+    Socket Event Data:
+        target_sid (str): Recipient's socket ID
+        encrypted_key (str): Group key encrypted with P2P shared secret
+        key_version (int): Key version number
+        our_public_key (str): Sharer's DH public key (for recipient to derive shared secret)
+    
+    Emits:
+        'group_key_from_peer': Delivers encrypted key to recipient
+    
+    Note:
+        The server cannot decrypt this key blob - it's encrypted with a shared
+        secret derived from DH exchange between the two peers. Only the recipient
+        can decrypt it.
+    """
+    sender_sid = request.sid
+    sender_username = connections[sender_sid]['username']
+    target_sid = data.get('target_sid')
+    
+    # Use client-provided public key (client sends it now!)
+    socketio.emit('group_key_from_peer', {
+        'encrypted_key': data.get('encrypted_key'),
+        'key_version': data.get('key_version'),
+        'sharer_username': sender_username,
+        'sharer_public_key': data.get('our_public_key')  # From client!
+    }, to=target_sid)
+
+@socketio.on('request_key_from_peers')
+def handle_request_key_from_peers(data):
+    """
+    Request encryption key from ANY online member (not just generator).
+    
+    Called when a client doesn't have a key in localStorage and needs to
+    request it from the room. Finds ANY online member (not just the original generator),
+    making the system more resilient to generator offline situations.
+    
+    How it works:
+    1. Find ANY ready member in the room (has key, is ready)
+    2. Ask that member to share the key with this user
+    3. Member shares key using P2P DH encryption
+    
+    Socket Event Data:
+        key_version (int): Which key version is needed
+    
+    Emits:
+        'request_key_share': Asks found member to share key
+        'error': If no online members have the key
+    
+    Note:
+        This fixes the "Key distributor offline" issue - now ANY member can
+        distribute keys, not just the room creator
+    """
+    sid = request.sid
+    if sid not in connections:
+        return
+    
+    username = connections[sid]['username']
+    room_id = connections[sid]['room_id']
+    key_version = data.get('key_version', 0)
+    
+    logger.info(f"[E2EE] {username} needs key v{key_version}, finding someone who has it")
+    
+    # Find ANY ready member in the room (not just generator)
+    found_sharer = False
+    for member_sid, conn in connections.items():
+        if (conn.get('room_id') == room_id and 
+            conn.get('ready') and 
+            member_sid != sid):
+            
+            # Ask this member to share the key
+            member_name = conn['username']
+            logger.info(f"[E2EE] Asking {member_name} to share key v{key_version} with {username}")
+            socketio.emit('request_key_share', {
+                'target_username': username,
+                'target_sid': sid,
+                'key_version': key_version
+            }, to=member_sid)
+            found_sharer = True
+            break  # Only need one person to share
+    
+    if not found_sharer:
+        logger.error(f"[E2EE] No one online has key v{key_version}!")
+        emit('error', {'msg': 'No members online have the encryption key. Please wait for someone to rejoin or ask the room admin.'})
 
 @socketio.on('message')
 def handle_message(data):
@@ -1542,8 +1544,8 @@ def handle_message(data):
     username = conn['username']
     room_id = conn['room_id']
     
-    # Check ready state AND user_key
-    if not conn.get('ready') or not conn.get('user_key'):
+    # Check ready state
+    if not conn.get('ready'):
         emit('error', {'msg': 'Not ready to send messages. Please wait...'})
         logger.warning(f"[MSG] {username} tried to send but not ready")
         return
@@ -1556,11 +1558,13 @@ def handle_message(data):
         return
     
     try:
-        # Get current room key with lock
+        # Get current key version (TRUE E2EE - no plaintext key!)
         room_lock = get_room_lock(room_id)
         with room_lock:
-            room_key, key_version = room_manager.get_room_key(room_id)
-            if not room_key:
+            _, key_version = room_manager.get_room_key(room_id)
+            
+            # Just check if room has a key version
+            if room_id not in room_keys:
                 emit('error', {'msg': 'Room key not available'})
                 return
             
@@ -1792,23 +1796,38 @@ def handle_reaction(data):
 @socketio.on('kick_user')
 def handle_kick(data):
     """
-    Kick a user from the room and rotate encryption key.
+    Kick a user from room and trigger client-side key rotation.
     
-    Verifies admin authorization, removes user, generates new key (version N+1),
-    force-disconnects kicked user, distributes new key to remaining members.
+    This is the server-side handler for kicking users. It:
+    1. Verifies admin authorization
+    2. Removes user from database (member list, reactions)
+    3. Disconnects their socket connections
+    4. Increments key version in database
+    5. Signals admin (kicker) to generate NEW key client-side
     
-    Data:
+    In TRUE E2EE, key rotation happens CLIENT-SIDE:
+    - Admin generates new random key
+    - Admin shares it with remaining members P2P
+    - Server never sees the new key
+    
+    Socket Event Data:
         user (str): Username to kick
     
     Emits:
-        'error' if unauthorized
-        'kicked' to kicked user
-        'sys_msg' (kick notification) to room
-        'group_key' (new key) to remaining members
+        'error': If not authorized or user not in room
+        'kicked': To the kicked user's socket (forces disconnect)
+        'sys_msg': Kick notification to room
+        'rotate_group_key': To admin, signals client-side key generation
+        'reactions_cleaned': Notification to refresh reactions UI
     
-    Note:
-        CRITICAL SECURITY: Key rotation prevents kicked user from reading
-        future messages (forward secrecy).
+    Side Effects:
+        - Removes user from database (room_members, reactions)
+        - Increments key_version in database
+        - Updates room_keys dict in memory
+        - Disconnects kicked user's sockets
+    
+    Authorization:
+        Room admin or global admin only
     """
     sid = request.sid
     if sid not in connections:
@@ -1818,7 +1837,7 @@ def handle_kick(data):
     room_id = conn['room_id']
     kicked_user = data.get('user', '')
     
-    success, new_key, msg = room_manager.kick_user(room_id, conn['token'], kicked_user)
+    success, _, msg = room_manager.kick_user(room_id, conn['token'], kicked_user)
     
     if not success:
         emit('error', {'msg': msg})
@@ -1834,7 +1853,7 @@ def handle_kick(data):
             if s in connections and connections[s].get('room_id') == room_id:
                 kicked_sids.append(s)
     
-    # Remove from room_sids before distributing new key
+    # Remove from room_sids before key rotation
     for s in kicked_sids:
         if room_id in room_sids and s in room_sids[room_id]:
             room_sids[room_id].remove(s)
@@ -1849,21 +1868,66 @@ def handle_kick(data):
         if s in connections:
             del connections[s]
     
-    # Notify room AFTER removing kicked user - use 'to' parameter
+    # Notify room
     emit('sys_msg', {'type': 'kicked', 'user': kicked_user, 'msg': msg}, to=room_id, include_self=True, broadcast=True)
     
-    # Distribute new key to remaining members
-    threading.Thread(target=distribute_new_key_after_kick, 
-                    args=(room_id, new_key, new_version), daemon=True).start()
+    # TRUE E2EE: Ask kicker (admin) to generate new key
+    socketio.emit('rotate_group_key', {
+        'new_version': new_version,
+        'kicked_user': kicked_user
+    }, to=sid)
     
     broadcast_room_update()
     broadcast_member_update(room_id)
 
-    # Notify room to refresh reactions (removed kicked user's reactions)
     socketio.emit('reactions_cleaned', {
         'username': kicked_user,
         'msg': f'{kicked_user} was removed from the room'
     }, to=room_id)
+
+@socketio.on('request_key_share_for_rotation')
+def handle_request_key_share_for_rotation(data):
+    """
+    Request member's public key for distributing rotated encryption key.
+    
+    After key rotation (when a user is kicked), the admin who generated the
+    new key needs to share it with remaining members. This handler facilitates
+    requesting each member's DH public key so the admin can encrypt the new
+    key for them.
+    
+    This is identical to handle_request_user_public_key but specifically for
+    the key rotation scenario.
+    
+    Socket Event Data:
+        target_username (str): Member to request public key from
+        key_version (int): New key version being distributed
+    
+    Emits:
+        'send_public_key_to_peer': Request to member for their public key
+    
+    Note:
+        Called multiple times (once per remaining member) during key rotation
+        to distribute the new key to everyone except the kicked user.
+    """
+    sender_sid = request.sid
+    target_username = data.get('target_username')
+    key_version = data.get('key_version')
+    sender_name = connections[sender_sid]['username']
+    room_id = connections[sender_sid]['room_id']
+    
+    # Find target's socket
+    target_sid = None
+    for sid, conn in connections.items():
+        if conn.get('username') == target_username and conn.get('room_id') == room_id:
+            target_sid = sid
+            break
+    
+    if target_sid:
+        socketio.emit('send_public_key_to_peer', {
+            'requester_sid': sender_sid,
+            'requester_username': sender_name,
+            'key_version': key_version
+        }, to=target_sid)
 
 @socketio.on('leave_room')
 def handle_leave_room():
@@ -2005,7 +2069,34 @@ def handle_disconnect():
         
         del connections[sid]
         logger.info(f"[DISCONNECT] {username} [OFFLINE]")
+
+# ===== POPULATE ROOM_KEYS FROM DATABASE ON STARTUP =====
+logger.info("[STARTUP] Loading room key versions from database...")
+try:
+    all_rooms = db.list_all_rooms()  # Get all rooms from DB
+    for room_info in all_rooms:
+        room_id = room_info['id']
+        key_version = room_info.get('current_key_version', 0)
         
+        # Find the creator (generator) - use first admin
+        members = db.get_room_members(room_id)
+        admin_member = next((m for m in members if m['role'] == 'admin'), None)
+        generator = admin_member['username'] if admin_member else 'unknown'
+        
+        # Populate room_keys dict with version info
+        # (encrypted_key is None because server never has plaintext key in TRUE E2EE)
+        room_keys[room_id] = {
+            'encrypted_key': None,
+            'version': key_version,
+            'generator': generator
+        }
+        logger.info(f"[STARTUP] Loaded room {room_id}: key v{key_version}, generator={generator}")
+    
+    logger.info(f"[STARTUP] ✅ Loaded {len(room_keys)} room key versions from database")
+except Exception as e:
+    logger.error(f"[STARTUP] ❌ Failed to load room keys: {e}")
+# ===== END ROOM_KEYS POPULATION =====
+
 logger.info("="*60)
 logger.info("🚀 STARTING SERVER - Fresh Instance")
 logger.info(f"📊 Database: {db.DB_PATH}")

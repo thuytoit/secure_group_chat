@@ -247,6 +247,25 @@ def list_public_rooms() -> List[Dict]:
     rows = cursor.fetchall()
     return [dict(row) for row in rows]
 
+def list_all_rooms() -> List[Dict]:
+    """
+    Get all rooms from database (both public and private).
+    
+    Used during server startup to populate room_keys dict with version info.
+    
+    Returns:
+        list: All rooms with fields: id, name, type, current_key_version, etc.
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, name, type, current_key_version, invite_code, password_hash, creator
+        FROM rooms
+        ORDER BY created_at DESC
+    ''')
+    rows = cursor.fetchall()
+    return [dict(row) for row in rows]
+
 def get_user_rooms(username: str) -> List[Dict]:
     """
     Get all rooms a specific user is a member of.
