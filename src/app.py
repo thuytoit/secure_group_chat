@@ -45,7 +45,7 @@ from users import register, login, is_admin as is_global_admin, logout, load_use
 import bcrypt
 from rooms import room_manager, room_keys
 import database as db
-from crypto import parameters, derive_key, encrypt_message
+from crypto import parameters
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.backends import default_backend
 import io
@@ -930,7 +930,9 @@ def download_file(file_id):
         return jsonify({'success': False, 'msg': 'File not found'}), 404
     
     file_path = Path(matching_files[0])
-    original_filename = file_path.name.split('_', 1)[1]  # Remove "file_xxxxx_" prefix
+    # Remove the entire file_id prefix and underscore
+    prefix_to_remove = f"{file_id}_"
+    original_filename = file_path.name.replace(prefix_to_remove, '', 1)
     
     return send_file(
         file_path,
@@ -1028,10 +1030,13 @@ def delete_account_api():
 @app.route('/api/account/export', methods=['GET'])
 def export_account_data():
     """
-    Export all user data (GDPR Right to Access).
+    Export all user data with ENCRYPTED messages (GDPR Right to Access).
+    
+    Returns encrypted messages because server cannot decrypt in TRUE E2EE.
+    Client will decrypt using keys from localStorage before downloading.
     
     Returns:
-        JSON: All user data for download
+        JSON: All user data including encrypted messages for client-side decryption
     """
     if 'token' not in session or not is_valid_user(session['token']):
         return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
@@ -1039,10 +1044,10 @@ def export_account_data():
     try:
         username = session['username']
         
-        # Get all user data
+        # Get all user data WITH encrypted message content
         user_data = db.export_user_data_gdpr(username)
         
-        logger.info(f"[GDPR] Data exported for: {username}")
+        logger.info(f"[GDPR] Data exported for: {username} (encrypted, for client-side decryption)")
         
         return jsonify({
             'success': True,
@@ -1052,7 +1057,7 @@ def export_account_data():
     except Exception as e:
         logger.error(f"[GDPR] Export error: {e}")
         return jsonify({'success': False, 'msg': str(e)}), 500
-    
+           
 @app.route('/health')
 def health():
     """

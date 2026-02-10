@@ -254,12 +254,12 @@ def list_all_rooms() -> List[Dict]:
     Used during server startup to populate room_keys dict with version info.
     
     Returns:
-        list: All rooms with fields: id, name, type, current_key_version, etc.
+        list: All rooms with fields: id, name, type, key_version, etc.
     """
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT id, name, type, current_key_version, invite_code, password_hash, creator
+        SELECT id, name, type, key_version, invite_code, password_hash, creator
         FROM rooms
         ORDER BY created_at DESC
     ''')
@@ -338,9 +338,6 @@ def update_room_key_version(room_id: str, version: int):
     Args:
         room_id (str): Room to update
         version (int): New key version number (typically previous + 1)
-    
-    Note:
-        This is part of the key rotation mechanism for forward secrecy.
     """
     conn = get_db()
     cursor = conn.cursor()
@@ -1472,8 +1469,9 @@ def delete_user_data_gdpr(username: str) -> dict:
         'memberships_deleted': 0,
         'reports_deleted': 0,
         'files_deleted': 0,
+        'evidence_deleted': 0,
         'rooms_transferred': 0,
-        'deleted_rooms': []  # NEW: Track which rooms were deleted
+        'deleted_rooms': []  # Track which rooms were deleted
     }
     
     try:
@@ -1646,7 +1644,50 @@ def delete_user_data_gdpr(username: str) -> dict:
         cursor.execute('DELETE FROM room_members WHERE username = ?', (username,))
         print(f"[GDPR] Deleted {stats['memberships_deleted']} memberships")
         
-        # STEP 7: DELETE REPORTS
+        # STEP 7: DELETE EVIDENCE IMAGES (BEFORE deleting reports!)
+        print(f"[GDPR] Deleting evidence images...")
+        cursor.execute('''
+            SELECT evidence_file 
+            FROM reports 
+            WHERE reporter = ? AND evidence_file IS NOT NULL
+        ''', (username,))
+
+        evidence_rows = cursor.fetchall()
+        evidence_deleted = 0
+
+        for row in evidence_rows:
+            try:
+                evidence_file = row['evidence_file']
+                
+                # Handle both formats: JSON array or single string
+                try:
+                    evidence_files = json.loads(evidence_file)
+                    if not isinstance(evidence_files, list):
+                        evidence_files = [evidence_file]
+                except:
+                    evidence_files = [evidence_file]
+                
+                # Delete each evidence file from disk
+                evidence_folder = Path(__file__).parent / 'uploads' / 'evidence'
+                for evidence_path in evidence_files:
+                    # Extract filename from path (format: "evidence/evidence_xxxxx.png")
+                    filename = evidence_path.split('/')[-1]
+                    full_path = evidence_folder / filename
+                    
+                    if full_path.exists():
+                        full_path.unlink()
+                        evidence_deleted += 1
+                        print(f"[GDPR] ✓ Deleted evidence: {filename}")
+                    else:
+                        print(f"[GDPR] ⚠ Evidence not found: {filename}")
+                        
+            except Exception as e:
+                print(f"[GDPR] ✗ Error deleting evidence: {e}")
+
+        stats['evidence_deleted'] = evidence_deleted
+        print(f"[GDPR] Deleted {evidence_deleted} evidence images")
+
+        # STEP 8: DELETE REPORTS (AFTER deleting their evidence files)
         cursor.execute('DELETE FROM reports WHERE reporter = ?', (username,))
         print(f"[GDPR] Deleted {stats['reports_deleted']} reports")
         
@@ -1663,15 +1704,16 @@ def delete_user_data_gdpr(username: str) -> dict:
 
 def export_user_data_gdpr(username: str) -> dict:
     """
-    Export ALL data associated with a user (GDPR compliance).
+    Export ALL user data with full encrypted message content (GDPR compliance).
     
-    This is for GDPR "Right to Access" - user can see all their data.
+    Returns ENCRYPTED messages with key_version so client can decrypt using
+    keys from localStorage. This is TRUE E2EE - server never sees plaintext.
     
     Args:
         username (str): Username to export data for
     
     Returns:
-        dict: All user data in JSON-friendly format
+        dict: All user data in JSON-friendly format with encrypted messages
     """
     conn = get_db()
     cursor = conn.cursor()
@@ -1686,10 +1728,10 @@ def export_user_data_gdpr(username: str) -> dict:
     }
     
     try:
-        # Get all messages (with encrypted content - we can't decrypt server-side!)
+        # Get all messages WITH FULL encrypted content for client-side decryption
         cursor.execute('''
             SELECT m.id, m.room_id, r.name as room_name, m.sender, 
-                   m.encrypted_content, m.timestamp, m.key_version
+                   m.encrypted_content, m.timestamp, m.key_version, m.file_metadata
             FROM messages m
             JOIN rooms r ON m.room_id = r.id
             WHERE m.sender = ? AND m.deleted = 0
@@ -1697,13 +1739,17 @@ def export_user_data_gdpr(username: str) -> dict:
         ''', (username,))
         
         for row in cursor.fetchall():
-            data['messages'].append({
+            # Include FULL encrypted content so client can decrypt
+            msg_data = {
                 'message_id': row['id'],
-                'room': row['room_name'],
+                'room_id': row['room_id'],
+                'room_name': row['room_name'],
                 'timestamp': datetime.fromtimestamp(row['timestamp']).isoformat(),
-                'encrypted_content': row['encrypted_content'][:50] + '...',  # Truncated for privacy
-                'note': 'Content is end-to-end encrypted and cannot be decrypted by server'
-            })
+                'encrypted_content': row['encrypted_content'],  # FULL encrypted hex
+                'key_version': row['key_version'],  # Client needs this to pick correct key
+                'files': json.loads(row['file_metadata']) if row['file_metadata'] else []
+            }
+            data['messages'].append(msg_data)
         
         # Get all reactions
         cursor.execute('''
@@ -1733,6 +1779,7 @@ def export_user_data_gdpr(username: str) -> dict:
         
         for row in cursor.fetchall():
             data['room_memberships'].append({
+                'room_id': row['room_id'],
                 'room_name': row['name'],
                 'role': row['role'],
                 'joined_at': datetime.fromtimestamp(row['joined_at']).isoformat(),

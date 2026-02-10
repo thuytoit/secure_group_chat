@@ -571,7 +571,7 @@
           
           const groupKey = CryptoJS.AES.decrypt(
             { ciphertext: ciphertext },
-            p2pKey,  // Use P2P key, not user key!
+            p2pKey,
             { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
           );
           

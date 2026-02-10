@@ -3,6 +3,7 @@
 <head>
   <title>Chat Hub - {{ username }}</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/hub.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/dark-mode.css') }}">
 </head>
@@ -956,7 +957,9 @@
             `• ${result.stats.messages_deleted} messages\n` +
             `• ${result.stats.reactions_deleted} reactions\n` +
             `• ${result.stats.memberships_deleted} room memberships\n` +
-            `• ${result.stats.reports_deleted} reports\n\n` +
+            `• ${result.stats.reports_deleted} reports\n` +
+            `• ${result.stats.files_deleted} uploaded files\n` +
+            `• ${result.stats.evidence_deleted} evidence images\n\n` +
             'You will now be redirected to the login page.'
           );
           
@@ -972,37 +975,114 @@
     }
 
     async function exportAccountData() {
-      if (!confirm('Export all your data?\n\nThis will download a JSON file containing all your messages, reactions, room memberships, and reports.')) {
+      if (!confirm('Export all your data?\n\nThis will decrypt your messages and download a JSON file containing all your data in PLAINTEXT.')) {
         return;
       }
       
       try {
+        // Fetch encrypted data from server
         const res = await fetch('/api/account/export');
         const result = await res.json();
         
         if (result.success) {
-          // Create downloadable file
-          const dataStr = JSON.stringify(result.data, null, 2);
+          const exportData = result.data;
+          
+          // ===== DECRYPT MESSAGES CLIENT-SIDE =====
+          console.log(`[EXPORT] Decrypting ${exportData.messages.length} messages...`);
+          
+          let decryptedCount = 0;
+          let failedCount = 0;
+          
+          for (let i = 0; i < exportData.messages.length; i++) {
+            const msg = exportData.messages[i];
+            
+            try {
+              // Load keys for this room from localStorage
+              const roomKeysJson = localStorage.getItem(`room_${msg.room_id}_keys`);
+              
+              if (!roomKeysJson) {
+                console.warn(`[EXPORT] No keys found for room ${msg.room_id} (${msg.room_name})`);
+                msg.plaintext_content = `[Cannot decrypt - no encryption keys found for this room]`;
+                msg.decryption_status = 'no_keys';
+                failedCount++;
+                continue;
+              }
+              
+              // Parse stored keys
+              const roomKeys = JSON.parse(roomKeysJson);
+              const keyBase64 = roomKeys[msg.key_version];
+              
+              if (!keyBase64) {
+                console.warn(`[EXPORT] No key v${msg.key_version} for room ${msg.room_id}`);
+                msg.plaintext_content = `[Cannot decrypt - key version ${msg.key_version} not available]`;
+                msg.decryption_status = 'missing_key_version';
+                failedCount++;
+                continue;
+              }
+              
+              // Decrypt the message
+              const groupKey = CryptoJS.enc.Base64.parse(keyBase64);
+              const encHex = msg.encrypted_content;
+              
+              // Parse IV and ciphertext
+              const encBytes = CryptoJS.enc.Hex.parse(encHex);
+              const iv = CryptoJS.lib.WordArray.create(encBytes.words.slice(0, 4), 16);
+              const ciphertext = CryptoJS.lib.WordArray.create(
+                encBytes.words.slice(4),
+                encBytes.sigBytes - 16
+              );
+              
+              // Decrypt with AES-256-CBC
+              const decrypted = CryptoJS.AES.decrypt(
+                { ciphertext: ciphertext },
+                groupKey,
+                { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+              );
+              
+              const plaintext = decrypted.toString(CryptoJS.enc.Utf8);
+              
+              if (!plaintext) {
+                throw new Error('Decryption resulted in empty text');
+              }
+              
+              // Store plaintext in export data
+              msg.plaintext_content = plaintext;
+              msg.decryption_status = 'success';
+              delete msg.encrypted_content; // Remove encrypted version from export
+              decryptedCount++;
+              
+            } catch (err) {
+              console.error(`[EXPORT] Decryption failed for msg ${msg.message_id}:`, err);
+              msg.plaintext_content = `[Decryption error: ${err.message}]`;
+              msg.decryption_status = 'decryption_failed';
+              failedCount++;
+            }
+          }
+          
+          console.log(`[EXPORT] Decryption complete: ${decryptedCount} success, ${failedCount} failed`);
+          
+          // ===== DOWNLOAD AS JSON FILE =====
+          const dataStr = JSON.stringify(exportData, null, 2);
           const dataBlob = new Blob([dataStr], { type: 'application/json' });
           
-          // Create download link
           const url = window.URL.createObjectURL(dataBlob);
           const link = document.createElement('a');
           link.href = url;
           link.download = `my-data-${USERNAME}-${new Date().toISOString().split('T')[0]}.json`;
           
-          // Trigger download
           document.body.appendChild(link);
           link.click();
           document.body.removeChild(link);
           
           alert(
             '✅ Data Exported Successfully\n\n' +
-            `Total messages: ${result.data.messages.length}\n` +
-            `Total reactions: ${result.data.reactions.length}\n` +
-            `Room memberships: ${result.data.room_memberships.length}\n` +
-            `Reports filed: ${result.data.reports_filed.length}\n\n` +
-            'File has been downloaded.'
+            `Total messages: ${exportData.messages.length}\n` +
+            `Decrypted: ${decryptedCount}\n` +
+            `Failed: ${failedCount}\n` +
+            `Total reactions: ${exportData.reactions.length}\n` +
+            `Room memberships: ${exportData.room_memberships.length}\n` +
+            `Reports filed: ${exportData.reports_filed.length}\n\n` +
+            'File has been downloaded with PLAINTEXT messages.'
           );
         } else {
           alert('Error: ' + result.msg);

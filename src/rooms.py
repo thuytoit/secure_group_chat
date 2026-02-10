@@ -244,7 +244,7 @@ class RoomManager:
         
         Note:
             Unlike kick_user(), this does NOT rotate the encryption key since
-            it's a voluntary exit. User loses access but no forward secrecy needed.
+            it's a voluntary exit.
         """
         role = db.get_member_role(room_id, username)
         if not role:
