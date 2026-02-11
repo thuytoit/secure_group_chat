@@ -289,6 +289,10 @@
           const keysData = JSON.parse(saved);
           for (const [version, keyBase64] of Object.entries(keysData)) {
             state.groupKeys[version] = CryptoJS.enc.Base64.parse(keyBase64);
+
+            // 🔍 DEBUGGING: Log key fingerprint
+            const keyHex = state.groupKeys[version].toString(CryptoJS.enc.Hex);
+            console.log(`[LOAD] Key v${version} fingerprint: ${keyHex.substring(0, 16)}...`);
           }
           if (savedVersion) {
             state.currentKeyVersion = parseInt(savedVersion);
@@ -430,7 +434,8 @@
         const groupKey = CryptoJS.lib.WordArray.random(32);
         
         console.log(`[E2EE] ✅ Generated RANDOM group key (${groupKey.sigBytes} bytes)`);
-        console.log('[E2EE] First 8 bytes:', groupKey.toString(CryptoJS.enc.Hex).substring(0, 16));
+        const keyHex = groupKey.toString(CryptoJS.enc.Hex);
+        console.log('[E2EE] Key fingerprint:', keyHex.substring(0, 16) + '...');
         
         // Store locally
         state.groupKeys[data.key_version] = groupKey;
@@ -1153,11 +1158,11 @@
         const file = document.createElement('div');
         file.className = 'file-attachment';
         
-        // Check if it's an image
         const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(fileData.filename);
+        const isEncrypted = fileData.is_encrypted || false;
         
-        if (isImage) {
-          // Display image inline
+        if (isImage && !isEncrypted) {
+          // Display unencrypted image inline
           file.innerHTML = `
             <img src="/api/files/${fileData.file_id}" 
                 style="max-width: 300px; max-height: 300px; border-radius: 8px; cursor: pointer;" 
@@ -1166,8 +1171,16 @@
             <br>
             <span style="font-size: 11px; color: #999;">${escapeHtml(fileData.filename)} (${formatBytes(fileData.size)})</span>
           `;
+        } else if (isEncrypted) {
+          // Encrypted file - decrypt on click
+          file.innerHTML = `
+            📄 <a href="javascript:void(0)" onclick="downloadAndDecryptFile('${fileData.file_id}', '${escapeHtml(fileData.filename)}', ${fileData.key_version})">
+              ${escapeHtml(fileData.filename)} 🔒
+            </a>
+            <span style="color: #999;">(${formatBytes(fileData.size)} - encrypted)</span>
+          `;
         } else {
-          // Display as download link
+          // Unencrypted file - normal download
           file.innerHTML = `
             📄 <a href="/api/files/${fileData.file_id}" download="${escapeHtml(fileData.filename)}">
               ${escapeHtml(fileData.filename)}
@@ -1178,6 +1191,65 @@
         
         parentElement.appendChild(file);
       });
+    }
+
+    // ===== FILE DECRYPTION HELPER =====
+    async function downloadAndDecryptFile(fileId, filename, keyVersion) {
+      try {
+        // Fetch encrypted file
+        const response = await fetch(`/api/files/${fileId}`);
+        const encryptedBlob = await response.blob();
+        
+        // Read as base64
+        const base64 = await new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result.split(',')[1]);
+          reader.readAsDataURL(encryptedBlob);
+        });
+        
+        // Get decryption key
+        const key = state.groupKeys[keyVersion];
+        if (!key) {
+          alert(`Cannot decrypt file: missing key version ${keyVersion}`);
+          return;
+        }
+        
+        // Decrypt
+        const encrypted = CryptoJS.enc.Base64.parse(base64);
+        const iv = CryptoJS.lib.WordArray.create(encrypted.words.slice(0, 4), 16);
+        const ciphertext = CryptoJS.lib.WordArray.create(
+          encrypted.words.slice(4),
+          encrypted.sigBytes - 16
+        );
+        
+        const decrypted = CryptoJS.AES.decrypt(
+          { ciphertext: ciphertext },
+          key,
+          { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+        );
+        
+        // Convert WordArray to Uint8Array
+        const words = decrypted.words;
+        const sigBytes = decrypted.sigBytes;
+        const u8 = new Uint8Array(sigBytes);
+        for (let i = 0; i < sigBytes; i++) {
+          u8[i] = (words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
+        }
+        
+        // Download decrypted file
+        const blob = new Blob([u8]);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+        
+        console.log(`[FILE] Downloaded and decrypted: ${filename}`);
+      } catch (err) {
+        console.error('[FILE] Decryption error:', err);
+        alert(`Failed to decrypt file: ${err.message}`);
+      }
     }
     // ===== END HELPER =====
 
@@ -1698,30 +1770,62 @@
         }
       }
       
+      // Check encryption ready
+      if (!state.keyReady || Object.keys(state.groupKeys).length === 0) {
+        alert('Encryption not ready. Please wait...');
+        return;
+      }
+      
       // Show total upload progress
       state.isUploading = true;
       document.getElementById('attachBtn').disabled = true;
       document.getElementById('sendBtn').disabled = true;
       document.getElementById('uploadProgress').style.display = 'block';
-      document.getElementById('uploadProgress').textContent = `Uploading ${files.length} file(s)...`;
+      document.getElementById('uploadProgress').textContent = `Encrypting and uploading ${files.length} file(s)...`;
       
-      // Upload files one by one
+      // Encrypt and upload files one by one
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        document.getElementById('uploadProgress').textContent = `Uploading ${i + 1}/${files.length}: ${file.name}...`;
+        document.getElementById('uploadProgress').textContent = `Encrypting ${i + 1}/${files.length}: ${file.name}...`;
         
         try {
-          const base64 = await new Promise((resolve, reject) => {
+          // Read file as ArrayBuffer
+          const arrayBuffer = await new Promise((resolve, reject) => {
             const reader = new FileReader();
-            reader.onload = (e) => resolve(e.target.result.split(',')[1]);
+            reader.onload = (e) => resolve(e.target.result);
             reader.onerror = reject;
-            reader.readAsDataURL(file);
+            reader.readAsArrayBuffer(file);
           });
           
-          // Upload to server
+          // Convert to WordArray for CryptoJS
+          const wordArray = CryptoJS.lib.WordArray.create(arrayBuffer);
+          
+          // Encrypt with current room key
+          const currentKey = state.groupKeys[state.currentKeyVersion];
+          const iv = CryptoJS.lib.WordArray.random(16);
+          
+          const encrypted = CryptoJS.AES.encrypt(wordArray, currentKey, {
+            iv: iv,
+            mode: CryptoJS.mode.CBC,
+            padding: CryptoJS.pad.Pkcs7
+          });
+          
+          // Combine IV + ciphertext
+          const combined = iv.clone().concat(encrypted.ciphertext);
+          const encryptedBase64 = combined.toString(CryptoJS.enc.Base64);
+          
+          console.log(`[FILE] Encrypted ${file.name} (${file.size} bytes → ${encryptedBase64.length} chars)`);
+          
+          // Upload encrypted file
+          document.getElementById('uploadProgress').textContent = `Uploading ${i + 1}/${files.length}: ${file.name}...`;
+          
           await new Promise((resolve, reject) => {
             const handler = (data) => {
-              state.pendingFileMetadata.push(data);
+              // Store metadata including key version for decryption
+              state.pendingFileMetadata.push({
+                ...data,
+                key_version: state.currentKeyVersion  // Store which key was used!
+              });
               resolve();
             };
             
@@ -1733,13 +1837,15 @@
             socket.once('upload_error', errorHandler);
             
             socket.emit('upload_file', {
-              file_data: base64,
+              file_data: encryptedBase64,
               filename: file.name,
-              content_type: file.type || 'application/octet-stream'
+              content_type: file.type || 'application/octet-stream',
+              key_version: state.currentKeyVersion,  // Tell server which key was used
+              is_encrypted: true  // Flag that this is encrypted
             });
           });
         } catch (err) {
-          alert(`Failed to upload ${file.name}: ${err.message}`);
+          alert(`Failed to encrypt/upload ${file.name}: ${err.message}`);
           state.isUploading = false;
           state.pendingFileMetadata = [];
           document.getElementById('uploadProgress').style.display = 'none';
@@ -1759,7 +1865,7 @@
       document.getElementById('sendBtn').disabled = false;
       event.target.value = '';
     }
-    
+
     function updateFilePreview() {
       const container = document.getElementById('filePreviewContainer');
       container.innerHTML = '';

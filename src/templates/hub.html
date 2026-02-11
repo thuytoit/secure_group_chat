@@ -684,8 +684,8 @@
       const members = snapshot.members;
       
       let html = `
-        <div style="background: #f9fafb; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
-          <h4 style="margin-bottom: 12px;">📊 Room Information</h4>
+        <div class="snapshot-section">
+          <h4 class="snapshot-title">📊 Room Information</h4>
           <p><strong>Name:</strong> ${escapeHtml(room.name)}</p>
           <p><strong>Type:</strong> <span class="room-badge badge-${room.type}">${room.type.toUpperCase()}</span></p>
           <p><strong>Creator:</strong> ${escapeHtml(room.creator)}</p>
@@ -694,87 +694,89 @@
           ${room.description ? `<p><strong>Description:</strong> ${escapeHtml(room.description)}</p>` : ''}
         </div>
         
-        <div style="background: #f9fafb; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
-          <h4 style="margin-bottom: 12px;">👥 Members (${members.length})</h4>
-          <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px;">
+        <div class="snapshot-section">
+          <h4 class="snapshot-title">👥 Members (${members.length})</h4>
+          <div class="members-grid">
       `;
       
       members.forEach(member => {
         const isOnline = member.is_online === 1;
         html += `
-          <div style="padding: 8px; background: white; border-radius: 4px; font-size: 13px;">
+          <div class="member-card-snapshot">
             <strong>${escapeHtml(member.username)}</strong>
             ${member.role === 'admin' ? '<span class="room-badge badge-admin" style="margin-left: 4px; font-size: 10px;">ADMIN</span>' : ''}
             <br>
-            <span style="color: ${isOnline ? '#16a34a' : '#999'};">●</span>
-            <span style="font-size: 11px; color: #666;">${isOnline ? 'Online' : 'Offline'}</span>
+            <span class="status-indicator ${isOnline ? 'online' : 'offline'}">●</span>
+            <span class="status-text">${isOnline ? 'Online' : 'Offline'}</span>
           </div>
         `;
       });
+      
+      html += `</div></div>`; // Close members-grid and snapshot-section
       
       // Report History Section
       const reportHistory = snapshot.report_history;
       
       if (reportHistory) {
-        const riskColor = reportHistory.risk_level === 'HIGH' ? '#ef4444' : 
-                         reportHistory.risk_level === 'MEDIUM' ? '#f59e0b' : '#10b981';
+        const riskClass = reportHistory.risk_level === 'HIGH' ? 'risk-high' : 
+                        reportHistory.risk_level === 'MEDIUM' ? 'risk-medium' : 'risk-low';
         
         html += `
-          <div style="background: #f9fafb; padding: 16px; border-radius: 8px; margin-top: 16px; border-left: 4px solid ${riskColor};">
-            <h4 style="margin-bottom: 12px;">⚠️ Report History 
-              <span style="background: ${riskColor}; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px; margin-left: 8px;">
+          <div class="snapshot-section report-section ${riskClass}">
+            <h4 class="snapshot-title">⚠️ Report History 
+              <span class="risk-badge ${riskClass}">
                 ${reportHistory.risk_level} RISK
               </span>
             </h4>
             
-            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px;">
-              <div style="padding: 12px; background: white; border-radius: 6px; text-align: center;">
-                <div style="font-size: 24px; font-weight: bold; color: #667eea;">${reportHistory.total_reports}</div>
-                <div style="font-size: 12px; color: #666;">Total Reports</div>
+            <div class="stats-grid">
+              <div class="stat-box">
+                <div class="stat-number stat-total">${reportHistory.total_reports}</div>
+                <div class="stat-label">Total Reports</div>
               </div>
-              <div style="padding: 12px; background: white; border-radius: 6px; text-align: center;">
-                <div style="font-size: 24px; font-weight: bold; color: #f59e0b;">${reportHistory.pending_reports}</div>
-                <div style="font-size: 12px; color: #666;">Pending</div>
+              <div class="stat-box">
+                <div class="stat-number stat-pending">${reportHistory.pending_reports}</div>
+                <div class="stat-label">Pending</div>
               </div>
-              <div style="padding: 12px; background: white; border-radius: 6px; text-align: center;">
-                <div style="font-size: 24px; font-weight: bold; color: #10b981;">${reportHistory.resolved_reports}</div>
-                <div style="font-size: 12px; color: #666;">Resolved</div>
+              <div class="stat-box">
+                <div class="stat-number stat-resolved">${reportHistory.resolved_reports}</div>
+                <div class="stat-label">Resolved</div>
               </div>
             </div>
             
-            <p style="font-size: 13px; color: #666; margin-bottom: 12px;">
+            <p class="recent-count">
               📊 <strong>${reportHistory.recent_reports_7d}</strong> reports in the last 7 days
             </p>
         `;
         
         if (reportHistory.reports && reportHistory.reports.length > 0) {
-          html += '<h5 style="margin: 16px 0 8px 0; font-size: 14px;">Recent Reports:</h5>';
+          html += '<h5 class="reports-subtitle">Recent Reports:</h5>';
           
           // Show last 5 reports
           reportHistory.reports.slice(0, 5).forEach(report => {
             const date = new Date(report.timestamp * 1000);
-            const statusColor = report.status === 'pending' ? '#f59e0b' : '#10b981';
+            const statusClass = report.status === 'pending' ? 'status-pending' : 'status-resolved';
             
             html += `
-              <div style="padding: 10px; background: white; border-radius: 4px; margin-bottom: 8px; border-left: 3px solid ${statusColor};">
-                <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                  <strong style="font-size: 13px;">${escapeHtml(report.reason)}</strong>
-                  <span style="font-size: 11px; color: #999;">${date.toLocaleString()}</span>
+              <div class="report-card ${statusClass}">
+                <div class="report-card-header">
+                  <strong class="report-reason">${escapeHtml(report.reason)}</strong>
+                  <span class="report-time">${date.toLocaleString()}</span>
                 </div>
-                <div style="font-size: 12px; color: #666;">
+                <div class="report-meta">
                   By: ${escapeHtml(report.reporter)} | 
-                  Status: <span style="color: ${statusColor}; font-weight: 600;">${report.status.toUpperCase()}</span>
+                  Status: <span class="status-badge ${statusClass}">${report.status.toUpperCase()}</span>
                 </div>
-                ${report.details ? `<div style="font-size: 11px; color: #999; margin-top: 4px;">${escapeHtml(report.details).substring(0, 100)}${report.details.length > 100 ? '...' : ''}</div>` : ''}
+                ${report.details ? `<div class="report-details-text">${escapeHtml(report.details).substring(0, 100)}${report.details.length > 100 ? '...' : ''}</div>` : ''}
               </div>
             `;
           });
           
           if (reportHistory.reports.length > 5) {
-            html += `<p style="font-size: 12px; color: #666; font-style: italic; text-align: center;">+ ${reportHistory.reports.length - 5} more reports</p>`;
+            html += `<p class="more-reports">+ ${reportHistory.reports.length - 5} more reports</p>`;
           }
         } else {
-          html += '<p style="color: #10b981; font-size: 13px;">✅ No reports filed for this room</p>';
+          html += '<p class="no-reports">✅ No reports filed for this room</p>';
         }
         
         html += '</div>';

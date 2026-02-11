@@ -909,15 +909,8 @@ def download_file(file_id):
     """
     Serve an uploaded file for download.
     
-    Args:
-        file_id (str): Unique file identifier
-    
-    Returns:
-        File: File download with original filename
-        JSON: Error if file not found
-    
-    Authorization:
-        Requires valid session token
+    For encrypted files, returns encrypted blob. Client must decrypt
+    using the key_version stored in message metadata.
     """
     if 'token' not in session or not is_valid_user(session['token']):
         return jsonify({'success': False, 'msg': 'Unauthorized'}), 401
@@ -930,16 +923,16 @@ def download_file(file_id):
         return jsonify({'success': False, 'msg': 'File not found'}), 404
     
     file_path = Path(matching_files[0])
-    # Remove the entire file_id prefix and underscore
-    prefix_to_remove = f"{file_id}_"
-    original_filename = file_path.name.replace(prefix_to_remove, '', 1)
+    original_filename = file_path.name.split('_', 1)[1]  # Remove "file_xxxxx_" prefix
     
+    # Return file as-is (encrypted or plain)
+    # Client will decrypt if needed based on is_encrypted flag in metadata
     return send_file(
         file_path,
         download_name=original_filename,
         as_attachment=True
     )
-
+    
 @app.route('/api/account/delete', methods=['POST'])
 def delete_account_api():
     """
@@ -1246,19 +1239,22 @@ def handle_dh_peer(data):
         # Determine next step
         room_id = connections[sid]['room_id']
         username = connections[sid]['username']
-        members = db.get_room_members(room_id)
-
-        if len(members) == 1 and members[0]['username'] == username:
-            # First member - generate key client-side
-            logger.info(f"[E2EE] {username} is FIRST - requesting client key generation")
-            emit('generate_group_key', {'room_id': room_id, 'key_version': 0})
-        else:
-            # Not first - check if they have key in localStorage
-            logger.info(f"[E2EE] {username} joining existing room - checking if they have key")
+        
+        # Check if room key EXISTS (not just member count!)
+        # This prevents regenerating keys on reconnection
+        if room_id in room_keys and room_keys[room_id].get('version') is not None:
+            # Room already has a key - check if user has it in localStorage
+            current_version = room_keys[room_id]['version']
+            logger.info(f"[E2EE] {username} reconnecting - room has key v{current_version}, checking localStorage")
             emit('check_for_stored_key', {
                 'room_id': room_id,
-                'key_version': room_keys.get(room_id, {}).get('version', 0)
+                'key_version': current_version
             })
+        else:
+            # No key exists yet - this is the FIRST EVER connection to this room
+            # User should generate the initial key
+            logger.info(f"[E2EE] {username} is FIRST EVER - requesting client key generation")
+            emit('generate_group_key', {'room_id': room_id, 'key_version': 0})
             
     except Exception as e:
         logger.error(f"[DH] Failed for {sid}: {e}")
@@ -1308,17 +1304,14 @@ def handle_submit_group_key(data):
     Receive and store client-generated encryption key (TRUE E2EE).
     
     This is called when a client generates a new room encryption key and sends
-    it back to the server. In TRUE end-to-end encryption, the server receives
-    the key ENCRYPTED with the user's personal key (derived from DH exchange),
-    so the server cannot decrypt it.
+    it back to the server. In true end-to-end encryption, the server receives
+    only the key version number; the client retains the actual group key.
     
     The server stores:
-    - Encrypted key blob (which it cannot decrypt)
     - Key version number
     - Generator username (for finding key sharers later)
     
     Socket Event Data:
-        encrypted_key (str): Hex-encoded encrypted group key (encrypted with user key)
         key_version (int): Key version number (typically 0 for first key)
     
     Emits:
@@ -1648,24 +1641,10 @@ def handle_load_more(data):
 @socketio.on('upload_file')
 def handle_file_upload(data):
     """
-    Receive and save an uploaded file.
+    Receive and save an uploaded file (encrypted or unencrypted).
     
-    Decodes base64 file data, validates size and type, saves to uploads
-    folder with unique ID, returns metadata for attaching to message.
-    Called multiple times for multi-file uploads (one file at a time).
-    
-    Data:
-        file_data (str): Base64-encoded file content
-        filename (str): Original filename (preserves parentheses and spaces)
-        content_type (str): MIME type
-    
-    Emits:
-        'file_uploaded' with file metadata on success
-        'upload_error' on failure
-    
-    Note:
-        Files are stored unencrypted on server (transport encryption via TLS).
-        Maximum file size: 16MB per file. Multiple files uploaded sequentially.
+    Supports TRUE E2EE file encryption where files are encrypted client-side
+    before upload. Server stores encrypted blob and cannot decrypt.
     """
     sid = request.sid
     if sid not in connections:
@@ -1673,17 +1652,17 @@ def handle_file_upload(data):
         return
     
     try:
-        # Decode the base64 file data
+        # Decode the base64 file data (may be encrypted!)
         file_data = base64.b64decode(data['file_data'])
-        # Preserve original filename without over-sanitization
-        import re
-        original_filename = data['filename']
-        filename = secure_filename(original_filename) or 'uploaded_file'
+        filename = secure_filename(data['filename']) or 'uploaded_file'
         content_type = data.get('content_type', 'application/octet-stream')
+        key_version = data.get('key_version', 0)
+        is_encrypted = data.get('is_encrypted', False)
         
-        # Check file size
-        if len(file_data) > 16 * 1024 * 1024:
-            emit('upload_error', {'msg': 'File too large (max 16MB)'})
+        # Check file size (encrypted files are larger)
+        max_size = 20 * 1024 * 1024 if is_encrypted else 16 * 1024 * 1024
+        if len(file_data) > max_size:
+            emit('upload_error', {'msg': f'File too large (max {max_size // (1024*1024)}MB)'})
             return
         
         # Check file type
@@ -1695,7 +1674,7 @@ def handle_file_upload(data):
         import secrets
         file_id = f"file_{secrets.token_hex(16)}"
         
-        # Save file to uploads folder
+        # Save file to uploads folder (encrypted or plain)
         file_path = UPLOAD_FOLDER / f"{file_id}_{filename}"
         with open(file_path, 'wb') as f:
             f.write(file_data)
@@ -1704,14 +1683,16 @@ def handle_file_upload(data):
             'file_id': file_id,
             'filename': filename,
             'size': len(file_data),
-            'content_type': content_type
+            'content_type': content_type,
+            'key_version': key_version,
+            'is_encrypted': is_encrypted
         })
         
-        logger.info(f"[FILE] Saved {filename} ({len(file_data)} bytes) - ID: {file_id}")
+        logger.info(f"[FILE] Saved {filename} ({'ENCRYPTED' if is_encrypted else 'PLAIN'}) - ID: {file_id}")
     except Exception as e:
         logger.error(f"[FILE] Upload error: {e}")
         emit('upload_error', {'msg': f'File upload failed: {str(e)}'})
-
+        
 @socketio.on('delete_message')
 def handle_delete_message(data):
     """
