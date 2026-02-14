@@ -66,7 +66,7 @@ UPLOAD_FOLDER = Path(__file__).parent / 'uploads'
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx', 'zip', 'mp4', 'mp3'}
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=20*1024*1024)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', max_http_buffer_size=22*1024*1024)
 
 logging.basicConfig(level=logging.INFO if app.config['DEBUG'] else logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -413,12 +413,17 @@ def chat(room_id):
     room_info = room_manager.get_room_info(room_id)
     if not room_info:
         return redirect(url_for('hub'))
+
+    # Properly escape room name for JavaScript
+    import json
+    room_name_safe = json.dumps(room_info['name'])  # Escapes apostrophes!
     
     return render_template('chat.html',
                          username=session['username'],
                          role=session['role'],
                          room_id=room_id,
-                         room_name=room_info['name'],
+                         room_name=room_info['name'],  # For HTML title (safe)
+                         room_name_js=room_name_safe,   # For JavaScript (safe)
                          room_description=room_info.get('description', ''),
                          room_max_members=room_info.get('max_members', 50),
                          room_role=role,
@@ -1660,7 +1665,7 @@ def handle_file_upload(data):
         is_encrypted = data.get('is_encrypted', False)
         
         # Check file size (encrypted files are larger)
-        max_size = 20 * 1024 * 1024 if is_encrypted else 16 * 1024 * 1024
+        max_size = 22 * 1024 * 1024 if is_encrypted else 16 * 1024 * 1024
         if len(file_data) > max_size:
             emit('upload_error', {'msg': f'File too large (max {max_size // (1024*1024)}MB)'})
             return

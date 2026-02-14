@@ -28,15 +28,26 @@ def generate_room_id(name: str) -> str:
         str: Unique room ID (e.g., "room_a3f9c2d8_general_chat")
     
     Example:
-        generate_room_id("General Chat")
-        'room_a3f9c2d8_general_chat'
+        generate_room_id("Bob's Room!")
+        'room_a3f9c2d8_bobs_room'
     
     Note:
         The random token ensures uniqueness even if room names are reused
-        after deletion. Name is truncated to 20 chars and sanitized.
+        after deletion. Name is sanitized to only contain alphanumeric chars
+        and underscores.
     """
-    return f"room_{secrets.token_hex(8)}_{name[:20].replace(' ', '_').lower()}"
-
+    import re
+    # Remove all non-alphanumeric characters (except spaces)
+    sanitized = re.sub(r'[^a-zA-Z0-9\s]', '', name)
+    # Replace spaces with underscores
+    sanitized = sanitized.replace(' ', '_').lower()
+    # Limit to 20 characters
+    sanitized = sanitized[:20]
+    # Remove trailing underscores
+    sanitized = sanitized.rstrip('_')
+    
+    return f"room_{secrets.token_hex(8)}_{sanitized}"
+    
 def generate_invite_code() -> str:
     """
     Generate a cryptographically secure invite code for private rooms.

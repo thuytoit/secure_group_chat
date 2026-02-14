@@ -238,6 +238,7 @@
     const TOKEN = '{{ token | safe }}';
     const ROOM_ID = '{{ room_id }}';
     const USERNAME = '{{ username }}';
+    const ROOM_NAME = {{ room_name_js | safe }};  // JSON-encoded, safe from apostrophes
     let ROOM_ROLE = '{{ room_role }}';
     const IS_GLOBAL_ADMIN = {{ is_global_admin|tojson }};
     const SALT = '{{ salt }}';
@@ -450,7 +451,7 @@
             key_version: data.key_version
         });
         
-        console.log('[E2EE] ✅ Sent ENCRYPTED group key to server');
+        console.log('[E2EE] ✅ Sent group key VERSION to server');
         updateStatus(`Ready - TRUE E2EE Chat (v${data.key_version})`, true);
       });
 

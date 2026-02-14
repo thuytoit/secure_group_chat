@@ -43,7 +43,7 @@
         <div class="room-grid" id="userRoomsList">
           {% if user_rooms %}
             {% for room in user_rooms %}
-            <div class="room-card" onclick="joinRoom('{{ room.id }}')">
+            <div class="room-card" data-room-id="{{ room.id }}" onclick="joinRoom(this.dataset.roomId)">
               <div class="room-name">{{ room.name }}</div>
               <div class="room-desc">{{ room.description or 'No description' }}</div>
               <div class="room-meta">
@@ -73,7 +73,7 @@
         <div class="room-grid" id="publicRoomsList">
           {% if public_rooms %}
             {% for room in public_rooms %}
-            <div class="room-card" onclick="joinRoomDirect('{{ room.id }}')">
+            <div class="room-card" data-room-id="{{ room.id }}" onclick="joinRoomDirect(this.dataset.roomId)">
               <div class="room-name">{{ room.name }}</div>
               <div class="room-desc">{{ room.description or 'No description' }}</div>
               <div class="room-meta">
