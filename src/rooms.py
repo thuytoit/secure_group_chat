@@ -226,12 +226,7 @@ class RoomManager:
         
         # Ensure room key exists
         if room_id not in room_keys:
-            print(f"[KEY_WARNING] Room {room_id} key not found in memory!")
-            print(f"[KEY_WARNING] Server restart detected. Creating new key.")
-            room_keys[room_id] = {
-                'key': os.urandom(32),
-                'version': room.get('key_version', 0)
-            }
+            return False, None, "Room key unavailable. Please rejoin."
         
         return True, room_id, f"Joined '{room['name']}'"
     

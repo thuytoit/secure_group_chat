@@ -1543,9 +1543,9 @@
     }
 
     window.addEventListener('load', () => {
-      const priv_hex = Array.from({ length: 256 }, () =>
-        Math.floor(Math.random() * 256).toString(16).padStart(2, '0')
-      ).join('');
+      const privBytes = new Uint8Array(256);
+      crypto.getRandomValues(privBytes);
+      const priv_hex = Array.from(privBytes, b => b.toString(16).padStart(2, '0')).join('');
       state.priv = BigInt('0x' + priv_hex);
 
       // Try to load keys from storage
