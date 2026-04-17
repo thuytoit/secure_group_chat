@@ -72,6 +72,10 @@ def register(username, password):
         >>> print(success, msg)
         True Registered
     """
+    if not username or len(username) < 3 or len(username) > 20:
+        return False, "Username must be between 3 and 20 characters"
+    if not password or len(password) < 6:
+        return False, "Password must be at least 6 characters"
     users = load_users()
     if username in users:
         return False, "User exists"
