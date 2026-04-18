@@ -11,7 +11,6 @@
   <div class="chat-header">
     <div>
       <h1>
-        <span>🔒</span>
         <span id="roomName">{{ room_name }}</span>
       </h1>
       <div class="status" id="status">
@@ -22,16 +21,16 @@
     </div>
     <div class="actions">
       {% if room_role == 'admin' or is_global_admin %}
-      <button class="btn btn-light" onclick="showEditModal()">✏️ Edit</button>
+      <button class="btn btn-light" onclick="showEditModal()">Edit</button>
       {% if room_type == 'private' %}
-      <button class="btn btn-light" onclick="showInviteModal()">🔗 Show Access</button>
+      <button class="btn btn-light" onclick="showInviteModal()">Show Access</button>
       {% endif %}
-      <button class="btn btn-light" onclick="showSwitchTypeModal()">🔄 Switch Type</button>
-      <button class="btn btn-danger" onclick="showDeleteModal()">🗑️ Delete Room</button>
-      <button class="btn btn-light" onclick="showKickModal()">👢 Kick User</button>
+      <button class="btn btn-light" onclick="showSwitchTypeModal()">Switch Type</button>
+      <button class="btn btn-danger" onclick="showDeleteModal()">Delete Room</button>
+      <button class="btn btn-light" onclick="showKickModal()">Kick User</button>
       {% endif %}
-      <button class="btn btn-light" onclick="showReportModal()">⚠️ Report</button>
-      <button class="btn btn-light" onclick="leaveRoom()">🚪 Leave</button>
+      <button class="btn btn-light" onclick="showReportModal()">Report</button>
+      <button class="btn btn-light" onclick="leaveRoom()">Leave</button>
       <a href="/hub" class="btn btn-light">← Hub</a>
     </div>
   </div>
@@ -100,7 +99,7 @@
       
       <div style="margin: 16px 0;">
         <label style="display: block; margin-bottom: 8px; font-weight: 600; font-size: 14px;">
-          📸 Attach Evidence (Required) *
+          Attach Evidence (Required) *
         </label>
         <p style="font-size: 12px; color: #666; margin-bottom: 8px;">
           Upload a screenshot or image as proof (max 5MB, .png .jpg .jpeg .gif)
@@ -131,7 +130,7 @@
       <div class="input-with-toggle">
         <input type="password" id="editPassword" placeholder="New password" style="padding-right: 40px;">
         <button type="button" class="password-toggle" onclick="togglePasswordVisibility('editPassword', this)">
-          👁️
+          Show
         </button>
       </div>
       {% endif %}
@@ -175,7 +174,7 @@
       
       {% if room_type == 'private' and not invite_code %}
       <p style="padding: 12px; background: #fef3c7; border-radius: 6px; font-size: 13px;">
-        🔒 This room is password-protected. Share the room name and password with users you want to invite.
+        This room is password-protected. Share the room name and password with users you want to invite.
       </p>
       {% endif %}
       
@@ -207,7 +206,7 @@
       
       <div id="switchPasswordOption" style="display: none; margin-top: 12px;">
         <div class="info-box">
-          💡 Switching to private will generate a NEW invite link. You can also add a password for extra security.
+          Switching to private will generate a NEW invite link. You can also add a password for extra security.
         </div>
         <div class="checkbox-group">
           <input type="checkbox" id="switchUsePassword" name="switch_use_password">
@@ -217,14 +216,14 @@
           <div class="input-with-toggle">
             <input type="password" id="switchPassword" placeholder="Enter password" style="padding-right: 40px;">
             <button type="button" class="password-toggle" onclick="togglePasswordVisibility('switchPassword', this)">
-              👁️
+              Show
             </button>
           </div>
         </div>
       </div>
       
       <div id="switchWarning" class="info-box" style="background: #fee2e2; color: #dc2626; margin-top: 12px; display: none;">
-        ⚠️ <strong>Warning:</strong> Switching to public will remove password protection and the invite link. Anyone will be able to join this room from the hub.
+        <strong>Warning:</strong> Switching to public will remove password protection and the invite link. Anyone will be able to join this room from the hub.
       </div>
       
       <div class="modal-actions">
@@ -275,7 +274,7 @@
         }
         localStorage.setItem(`room_${ROOM_ID}_keys`, JSON.stringify(keysToSave));
         localStorage.setItem(`room_${ROOM_ID}_version`, state.currentKeyVersion);
-        console.log(`💾 Saved ${Object.keys(keysToSave).length} keys to localStorage`);
+        console.log(`Saved ${Object.keys(keysToSave).length} keys to localStorage`);
       } catch (e) {
         console.error('Failed to save keys:', e);
       }
@@ -298,7 +297,7 @@
           if (savedVersion) {
             state.currentKeyVersion = parseInt(savedVersion);
           }
-          console.log(`📂 Loaded ${Object.keys(state.groupKeys).length} keys from localStorage`);
+          console.log(`Loaded ${Object.keys(state.groupKeys).length} keys from localStorage`);
           return true;
         }
       } catch (e) {
@@ -421,7 +420,7 @@
       });
 
       socket.on('connect', () => {
-        console.log('✅ Connected to room', ROOM_ID);
+        console.log('Connected to room', ROOM_ID);
         updateStatus('Connected, exchanging keys...');
         state.connectionAttempts = 0;
       });
@@ -429,12 +428,12 @@
       // ===== TRUE E2EE EVENT HANDLERS - ADD HERE =====
     
       socket.on('generate_group_key', (data) => {
-        console.log('[E2EE] 🔑 Server requested CLIENT to generate group key (TRUE E2EE)');
+        console.log('[E2EE] Server requested CLIENT to generate group key (TRUE E2EE)');
         
         // Generate TRUE random 32-byte key
         const groupKey = CryptoJS.lib.WordArray.random(32);
         
-        console.log(`[E2EE] ✅ Generated RANDOM group key (${groupKey.sigBytes} bytes)`);
+        console.log(`[E2EE] Generated RANDOM group key (${groupKey.sigBytes} bytes)`);
         const keyHex = groupKey.toString(CryptoJS.enc.Hex);
         console.log('[E2EE] Key fingerprint:', keyHex.substring(0, 16) + '...');
         
@@ -451,12 +450,12 @@
             key_version: data.key_version
         });
         
-        console.log('[E2EE] ✅ Sent group key VERSION to server');
+        console.log('[E2EE] Sent group key VERSION to server');
         updateStatus(`Ready - TRUE E2EE Chat (v${data.key_version})`, true);
       });
 
       socket.on('request_key_share', (data) => {
-        console.log(`[E2EE] 🔄 Request to share key v${data.key_version} with ${data.target_username}`);
+        console.log(`[E2EE] Request to share key v${data.key_version} with ${data.target_username}`);
         
         // Request new user's public key
         socket.emit('request_user_public_key', {
@@ -467,7 +466,7 @@
       });
 
       socket.on('send_public_key_to_peer', (data) => {
-        console.log(`[E2EE] 📤 ${data.requester_username} wants our public key`);
+        console.log(`[E2EE] ${data.requester_username} wants our public key`);
         
         // Calculate our current public DH key
         const clientPub = powMod(g, state.priv, p);
@@ -481,27 +480,27 @@
           our_username: USERNAME
         });
         
-        console.log('[E2EE] ✅ Sent our public key');
+        console.log('[E2EE] Sent our public key');
       });
 
       socket.on('user_public_key', (data) => {
-        console.log(`[E2EE] 📥 Received ${data.username}'s public key, encrypting group key for them`);
+        console.log(`[E2EE] Received ${data.username}'s public key, encrypting group key for them`);
         
         try {
           // Get our group key
           const groupKey = state.groupKeys[data.key_version];
           
           if (!groupKey) {
-            console.error('[E2EE] ❌ Don\'t have key version', data.key_version);
+            console.error('[E2EE] Don\'t have key version', data.key_version);
             
             // Prevent infinite loop
             if (state.isRequestingKey) {
-              console.warn('[E2EE] ⚠️ Already requesting key, ignoring');
+              console.warn('[E2EE] Already requesting key, ignoring');
               return;
             }
             
             state.isRequestingKey = true;
-            console.log('[E2EE] 🔄 Requesting key from others...');
+            console.log('[E2EE] Requesting key from others...');
             socket.emit('request_key_from_peers', {
               key_version: data.key_version
             });
@@ -510,9 +509,9 @@
             setTimeout(() => {
               state.isRequestingKey = false;
               if (!state.groupKeys[data.key_version]) {
-                console.error('[E2EE] ❌ Timeout: Could not get key from peers');
+                console.error('[E2EE] Timeout: Could not get key from peers');
                 addMessage({
-                  text: '⚠️ Could not get encryption key. Please refresh or ask room admin to rejoin.',
+                  text: 'Could not get encryption key. Please refresh or ask room admin to rejoin.',
                   type: 'error',
                   timestamp: Date.now() / 1000
                 });
@@ -549,15 +548,15 @@
             our_public_key: ourPubHex
           });
           
-          console.log(`[E2EE] ✅ Encrypted and sent key for ${data.username}`);
+          console.log(`[E2EE] Encrypted and sent key for ${data.username}`);
           
         } catch (e) {
-          console.error('[E2EE] ❌ Key sharing failed:', e);
+          console.error('[E2EE] Key sharing failed:', e);
         }
       });
 
       socket.on('group_key_from_peer', (data) => {
-        console.log(`[E2EE] 📦 Receiving group key from ${data.sharer_username}`);
+        console.log(`[E2EE] Receiving group key from ${data.sharer_username}`);
         
         try {
           // Compute P2P shared secret with the sharer
@@ -594,27 +593,27 @@
           // Save to localStorage
           saveKeysToStorage();
           
-          console.log(`[E2EE] ✅ Received and decrypted group key v${data.key_version} from ${data.sharer_username}`);
+          console.log(`[E2EE] Received and decrypted group key v${data.key_version} from ${data.sharer_username}`);
           updateStatus(`Ready - TRUE E2EE Chat (v${data.key_version})`, true);
           
           // Notify server we're ready
           socket.emit('client_ready');
           
         } catch (e) {
-          console.error('[E2EE] ❌ Failed to decrypt key from peer:', e);
+          console.error('[E2EE] Failed to decrypt key from peer:', e);
         }
       });
 
       // ===== END TRUE E2EE EVENT HANDLERS =====
 
       socket.on('error', (data) => {
-        console.error('❌ Socket error:', data);
+        console.error('Socket error:', data);
         addMessage({ text: `ERROR: ${data.msg}`, type: 'error' });
         updateStatus('Connection error', false, true);
       });
 
       socket.on('connect_error', (error) => {
-        console.error('❌ Connection error:', error);
+        console.error('Connection error:', error);
         updateStatus('Connection failed - retrying...', false, true);
         
         setTimeout(() => {
@@ -625,13 +624,13 @@
       });
 
       socket.on('force_disconnect', () => {
-        console.log('🔌 Force disconnect received');
+        console.log('Force disconnect received');
         addMessage({ text: 'Session replaced - redirecting', type: 'error' });
         setTimeout(() => window.location = '/hub', 1000);
       });
 
       socket.on('dh_pub', (data) => {
-        console.log('🔑 Received DH public key from server');
+        console.log('Received DH public key from server');
         try {
           const serverPub = BigInt('0x' + data.pub);
           
@@ -645,9 +644,9 @@
           socket.emit('dh_peer', { pub: clientPubHex });
           
           updateStatus('Ready for peer-to-peer key exchange...');
-          console.log('🔑 Sent DH peer key to server');
+          console.log('Sent DH peer key to server');
         } catch (e) {
-          console.error('❌ DH error:', e);
+          console.error('DH error:', e);
           addMessage({ text: 'Key exchange failed: ' + e.message, type: 'error' });
           updateStatus('Key exchange failed', false, true);
         }
@@ -658,7 +657,7 @@
         
         // Check if we have this version in our stored keys
         if (state.groupKeys[data.key_version]) {
-          console.log(`[E2EE] ✅ We already have key v${data.key_version} from localStorage!`);
+          console.log(`[E2EE] We already have key v${data.key_version} from localStorage!`);
           state.keyReady = true;
           state.currentKeyVersion = data.key_version;
           updateStatus(`Ready - TRUE E2EE Chat (v${data.key_version})`, true);
@@ -666,11 +665,11 @@
           // Tell server we're ready (no need to request key)
           socket.emit('client_ready');
         } else {
-          console.log(`[E2EE] ❌ Don't have key v${data.key_version}, requesting from others`);
+          console.log(`[E2EE] Don't have key v${data.key_version}, requesting from others`);
           
           // Prevent infinite loop
           if (state.isRequestingKey) {
-            console.warn('[E2EE] ⚠️ Already requesting key, ignoring');
+            console.warn('[E2EE] Already requesting key, ignoring');
             return;
           }
           
@@ -685,7 +684,7 @@
           setTimeout(() => {
             state.isRequestingKey = false;
             if (!state.groupKeys[data.key_version]) {
-              console.error('[E2EE] ❌ Timeout: Could not get key');
+              console.error('[E2EE] Timeout: Could not get key');
               updateStatus('Could not get encryption key', false, true);
             }
           }, 10000);
@@ -693,7 +692,7 @@
       });
     
       socket.on('message_history', (data) => {
-        console.log(`📜 Received ${data.messages?.length || 0} history messages`);
+        console.log(`Received ${data.messages?.length || 0} history messages`);
         if (!data.messages || !data.messages.length) return;
         
         // Take the LAST 50 messages (newest), not first 50 (oldest)
@@ -701,7 +700,7 @@
         const messagesToShow = totalMessages > 50 ? data.messages.slice(-50) : data.messages;
         const hasMore = totalMessages > 50;
         
-        console.log(`📜 Showing ${messagesToShow.length} messages (total: ${totalMessages}, has more: ${hasMore})`);
+        console.log(`Showing ${messagesToShow.length} messages (total: ${totalMessages}, has more: ${hasMore})`);
         
         messagesToShow.forEach((msg, idx) => {
           if (state.receivedMessageIds.has(msg.id)) {
@@ -725,13 +724,13 @@
               state.oldestMessageId = msg.id;
             }
           } catch (e) {
-            console.error(`❌ History decrypt error for msg ${msg.id} (key v${msg.key_version}):`, e.message);
+            console.error(`History decrypt error for msg ${msg.id} (key v${msg.key_version}):`, e.message);
           }
         });
         
         // Show "Load more" button if there are more than 50 messages
         if (hasMore) {
-          console.log(`📜 Showing "Load more" button (${totalMessages - 50} older messages available)`);
+          console.log(`Showing "Load more" button (${totalMessages - 50} older messages available)`);
           document.getElementById('loadMore').style.display = 'block';
         } else {
           document.getElementById('loadMore').style.display = 'none';
@@ -744,7 +743,7 @@
           return;
         }
         
-        console.log(`📜 Loading ${data.messages.length} older messages`);
+        console.log(`Loading ${data.messages.length} older messages`);
         
         const container = document.getElementById('messages');
         const loadMoreBtn = document.getElementById('loadMore');
@@ -826,7 +825,7 @@
             
             actions.innerHTML = `
               <span class="msg-action" onclick="showEmojiPicker(${msg.id}, event)">😊 React</span>
-              ${canDelete ? `<span class="msg-action" onclick="deleteMessage(${msg.id}, '${escapeHtml(msg.sender)}')">🗑️ Delete</span>` : ''}
+              ${canDelete ? `<span class="msg-action" onclick="deleteMessage(${msg.id}, '${escapeHtml(msg.sender)}')">Delete</span>` : ''}
             `;
             div.appendChild(actions);
             
@@ -842,7 +841,7 @@
             messages[msg.id] = { ...msg, text };
             messageElements[msg.id] = div;
           } catch (e) {
-            console.error('❌ Decrypt error for msg', msg.id, ':', e.message);
+            console.error('Decrypt error for msg', msg.id, ':', e.message);
           }
         });
 
@@ -851,7 +850,7 @@
         
         // FIXED: Hide button if we loaded fewer than 50 messages OR if oldest message ID is 1
         if (data.messages.length < 50 || state.oldestMessageId === 1) {
-          console.log('📜 No more older messages to load');
+          console.log('No more older messages to load');
           loadMoreBtn.style.display = 'none';
         }
       });
@@ -864,11 +863,11 @@
           text = `⊗ ${data.msg}`;
         }
         else if (data.type === 'admin_transfer') {
-          text = `👑 ${data.msg}`;
+          text = `${data.msg}`;
           
           // Check if user became the admin
           if (data.user === USERNAME) {
-            console.log('🎉 You are now the room admin!');
+            console.log('You are now the room admin!');
             updateAdminButtons('admin');
           }
         }
@@ -884,10 +883,10 @@
       });
 
       socket.on('encrypted_msg', (data) => {
-        console.log(`📨 Incoming from ${data.sender}, msg v${data.key_version}, our v${state.currentKeyVersion}`);
+        console.log(`Incoming from ${data.sender}, msg v${data.key_version}, our v${state.currentKeyVersion}`);
         
         if (state.receivedMessageIds.has(data.id)) {
-          console.log(`⏭️ Duplicate ${data.id}`);
+          console.log(`Duplicate ${data.id}`);
           return;
         }
         
@@ -898,7 +897,7 @@
         
         try {
           const text = safeDecrypt(data.enc, data.key_version);
-          console.log(`✅ Decrypted from ${data.sender}`);
+          console.log(`Decrypted from ${data.sender}`);
           
           addMessage({
             id: data.id,
@@ -911,7 +910,7 @@
           
           state.receivedMessageIds.add(data.id);
         } catch (e) {
-          console.error(`❌ Decrypt fail ${data.id}:`, e.message);
+          console.error(`Decrypt fail ${data.id}:`, e.message);
           
           addMessage({
             id: data.id,
@@ -958,7 +957,7 @@
       });
 
       socket.on('rotate_group_key', (data) => {
-        console.log(`[KEY_ROTATE] 🔄 Generating new key v${data.new_version} after kicking ${data.kicked_user}`);
+        console.log(`[KEY_ROTATE] Generating new key v${data.new_version} after kicking ${data.kicked_user}`);
         
         // Generate new random key
         const newKey = CryptoJS.lib.WordArray.random(32);
@@ -977,7 +976,7 @@
         // Save to localStorage
         saveKeysToStorage();
         
-        console.log(`[KEY_ROTATE] ✅ Generated new key v${data.new_version}, state.keyReady = true`);
+        console.log(`[KEY_ROTATE] Generated new key v${data.new_version}, state.keyReady = true`);
         
         // Now share it with all remaining members
         const members = document.querySelectorAll('.member-item');
@@ -997,7 +996,7 @@
         
         updateStatus(`Ready - TRUE E2EE Chat (v${data.new_version})`, true);
         addMessage({ 
-          text: `🔑 Security key rotated to v${data.new_version} after kicking ${data.kicked_user}`, 
+          text: `Security key rotated to v${data.new_version} after kicking ${data.kicked_user}`, 
           type: 'sys', 
           timestamp: Date.now() / 1000 
         });
@@ -1013,7 +1012,7 @@
       });
 
       socket.on('disconnect', (reason) => {
-        console.log(`🔌 Disconnected: ${reason}`);
+        console.log(`Disconnected: ${reason}`);
         if (reason === 'io server disconnect') {
           updateStatus('Disconnected from server - reconnecting...', false, true);
           setTimeout(reconnect, 1000);
@@ -1039,8 +1038,8 @@
       socket.on('room_type_changed', (data) => {
         if (data.room_id === ROOM_ID) {
           const typeMsg = data.new_type === 'private' 
-            ? `🔒 Room switched to PRIVATE by admin`
-            : `🌐 Room switched to PUBLIC by admin`;
+            ? `Room switched to PRIVATE by admin`
+            : `Room switched to PUBLIC by admin`;
           
           addMessage({ 
             text: typeMsg,
@@ -1176,7 +1175,7 @@
           // Encrypted file - decrypt on click
           file.innerHTML = `
             📄 <a href="javascript:void(0)" onclick="downloadAndDecryptFile('${fileData.file_id}', '${escapeHtml(fileData.filename)}', ${fileData.key_version})">
-              ${escapeHtml(fileData.filename)} 🔒
+              ${escapeHtml(fileData.filename)}
             </a>
             <span style="color: #999;">(${formatBytes(fileData.size)} - encrypted)</span>
           `;
@@ -1308,7 +1307,7 @@
         
         actions.innerHTML = `
           <span class="msg-action" onclick="showEmojiPicker(${data.id}, event)">😊 React</span>
-          ${canDelete ? `<span class="msg-action" onclick="deleteMessage(${data.id}, '${escapeHtml(data.sender)}')">🗑️ Delete</span>` : ''}
+          ${canDelete ? `<span class="msg-action" onclick="deleteMessage(${data.id}, '${escapeHtml(data.sender)}')">Delete</span>` : ''}
         `;
         div.appendChild(actions);
       }
@@ -1406,22 +1405,22 @@
           const editBtn = document.createElement('button');
           editBtn.className = 'btn btn-light';
           editBtn.onclick = showEditModal;
-          editBtn.textContent = '✏️ Edit';
+          editBtn.textContent = 'Edit';
           
           const switchBtn = document.createElement('button');
           switchBtn.className = 'btn btn-light';
           switchBtn.onclick = showSwitchTypeModal;
-          switchBtn.textContent = '🔄 Switch Type';
+          switchBtn.textContent = 'Switch Type';
           
           const deleteBtn = document.createElement('button');
           deleteBtn.className = 'btn btn-danger';
           deleteBtn.onclick = showDeleteModal;
-          deleteBtn.textContent = '🗑️ Delete Room';
+          deleteBtn.textContent = 'Delete Room';
           
           const kickBtn = document.createElement('button');
           kickBtn.className = 'btn btn-light';
           kickBtn.onclick = showKickModal;
-          kickBtn.textContent = '👢 Kick User';
+          kickBtn.textContent = 'Kick User';
           
           // Insert before Report button
           const reportBtn = actionsDiv.querySelector('[onclick="showReportModal()"]');
@@ -1436,11 +1435,11 @@
             const inviteBtn = document.createElement('button');
             inviteBtn.className = 'btn btn-light';
             inviteBtn.onclick = showInviteModal;
-            inviteBtn.textContent = '🔗 Show Access';
+            inviteBtn.textContent = 'Show Access';
             actionsDiv.insertBefore(inviteBtn, switchBtn);
           }
           
-          console.log('✅ Admin buttons added to UI');
+          console.log('Admin buttons added to UI');
         }
       }
     }
@@ -1499,7 +1498,7 @@
         return text;
         
       } catch (e) {
-        console.error('❌ Decrypt error details:', {
+        console.error('Decrypt error details:', {
           error: e.message,
           msgKeyVersion: msgKeyVersion,
           availableKeys: Object.keys(state.groupKeys).join(', '),
@@ -1537,7 +1536,7 @@
         return combined.toString(CryptoJS.enc.Hex);
         
       } catch (e) {
-        console.error('❌ Encrypt error:', e.message);
+        console.error('Encrypt error:', e.message);
         throw new Error(`Encryption failed: ${e.message}`);
       }
     }
@@ -1551,7 +1550,7 @@
       // Try to load keys from storage
       const hasStoredKeys = loadKeysFromStorage();
       if (hasStoredKeys) {
-        console.log('✅ Recovered keys from previous session');
+        console.log('Recovered keys from previous session');
       }
       
       const input = document.getElementById('msg-input');
@@ -1647,9 +1646,9 @@
       if (!msg && state.pendingFileMetadata.length === 0) return;
       
       if (!socket || !socket.connected) {
-        console.error('❌ Cannot send: Socket not connected');
+        console.error('Cannot send: Socket not connected');
         addMessage({
-          text: '⚠️ Not connected to server. Reconnecting...',
+          text: 'Not connected to server. Reconnecting...',
           type: 'error',
           timestamp: Date.now() / 1000
         });
@@ -1658,9 +1657,9 @@
       }
       
       if (!state.keyReady || Object.keys(state.groupKeys).length === 0) {
-        console.error('❌ Cannot send: No group keys');
+        console.error('Cannot send: No group keys');
         addMessage({
-          text: '⚠️ Encryption key not ready yet. Please wait...',
+          text: 'Encryption key not ready yet. Please wait...',
           type: 'error',
           timestamp: Date.now() / 1000
         });
@@ -1673,9 +1672,9 @@
       }
       
       if (state.isProcessingKeyRotation) {
-        console.warn('⚠️ Key rotation in progress, delaying send');
+        console.warn('Key rotation in progress, delaying send');
         addMessage({
-          text: '⚠️ Key rotation in progress. Please wait...',
+          text: 'Key rotation in progress. Please wait...',
           type: 'error',
           timestamp: Date.now() / 1000
         });
@@ -1705,11 +1704,11 @@
           throw new Error('Invalid current group key');
         }
         
-        console.log(`📤 Encrypting message (${displayText.length} chars) with key v${state.currentKeyVersion}`);
+        console.log(`Encrypting message (${displayText.length} chars) with key v${state.currentKeyVersion}`);
         
         const encryptedHex = safeEncrypt(displayText, currentKey);
         
-        console.log(`📤 Sending message (${displayText.length} chars, ${encryptedHex.length} hex chars), key v${state.currentKeyVersion}`);
+        console.log(`Sending message (${displayText.length} chars, ${encryptedHex.length} hex chars), key v${state.currentKeyVersion}`);
         
         // Send message with all attached files
         socket.emit('message', {
@@ -1719,7 +1718,7 @@
         
         input.value = '';
         input.style.height = 'auto';
-        state.pendingFileMetadata = [];  // ✅ Clear array
+        state.pendingFileMetadata = [];  // Clear array
         document.getElementById('filePreviewContainer').innerHTML = '';
         input.focus();
         
@@ -1736,7 +1735,7 @@
         // ===== END STOP TYPING INDICATOR =====
         
       } catch (e) {
-        console.error('❌ Encrypt error:', e);
+        console.error('Encrypt error:', e);
         alert('Failed to send message: ' + e.message);
       }
     }
@@ -1878,13 +1877,18 @@
         preview.className = 'file-preview';
         preview.innerHTML = `
           <span>📎 ${escapeHtml(file.filename)} (${formatBytes(file.size)})</span>
-          <button onclick="removeFile(${index})">❌</button>
+          <button onclick="removeFile(${index})">&times;</button>
         `;
         container.appendChild(preview);
       });
     }
     
     function removeFile(index) {
+      const file = state.pendingFileMetadata[index];
+      // Tell server to delete the orphaned uploaded file
+      if (file && file.file_id && socket && socket.connected) {
+        socket.emit('delete_uploaded_file', { file_id: file.file_id });
+      }
       state.pendingFileMetadata.splice(index, 1);
       updateFilePreview();
     }
@@ -2044,10 +2048,10 @@
       const input = document.getElementById(inputId);
       if (input.type === 'password') {
         input.type = 'text';
-        button.textContent = '🙈';
+        button.textContent = 'Hide';
       } else {
         input.type = 'password';
-        button.textContent = '👁️';
+        button.textContent = 'Show';
       }
     }
 
@@ -2140,7 +2144,6 @@
 
     function showEmojiPicker(msgId, event) {
       event.stopPropagation();
-      
       const existing = document.querySelector('.emoji-picker.active');
       if (existing) existing.remove();
       
@@ -2151,29 +2154,34 @@
         const span = document.createElement('span');
         span.className = 'emoji';
         span.textContent = emoji;
-        span.onclick = (e) => {
-          e.stopPropagation();
-          toggleReaction(msgId, emoji);
-          picker.remove();
-        };
+        span.onclick = (e) => { e.stopPropagation(); toggleReaction(msgId, emoji); picker.remove(); };
         picker.appendChild(span);
       });
       
       const msgEl = messageElements[msgId];
       if (msgEl) {
-        msgEl.style.position = 'relative';
         const actions = msgEl.querySelector('.msg-actions');
         if (actions) {
-          actions.style.position = 'relative';
           actions.appendChild(picker);
+          // Own messages: open picker rightward so it doesn't overflow left
+          if (msgEl.classList.contains('own')) {
+            picker.style.left = 'auto';
+            picker.style.right = '0';
+          }
+          // First message near header: flip picker downward instead of upward
+          requestAnimationFrame(() => {
+            const rect = picker.getBoundingClientRect();
+            if (rect.top < 70) {
+              picker.style.bottom = 'auto';
+              picker.style.top = '100%';
+              picker.style.marginBottom = '0';
+              picker.style.marginTop = '6px';
+            }
+          });
         }
-        
         setTimeout(() => {
           document.addEventListener('click', function closePickerOnClickOutside(e) {
-            if (!picker.contains(e.target)) {
-              picker.remove();
-              document.removeEventListener('click', closePickerOnClickOutside);
-            }
+            if (!picker.contains(e.target)) { picker.remove(); document.removeEventListener('click', closePickerOnClickOutside); }
           });
         }, 100);
       }

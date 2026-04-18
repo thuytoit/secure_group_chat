@@ -1236,9 +1236,9 @@ def migrate_add_online_status():
             cursor.execute('ALTER TABLE room_members ADD COLUMN is_online INTEGER DEFAULT 0')
             cursor.execute('ALTER TABLE room_members ADD COLUMN last_seen INTEGER DEFAULT 0')
             conn.commit()
-            print("[DB] ✅ Online status columns added successfully")
+            print("[DB] Online status columns added successfully")
         else:
-            print("[DB] ✅ Online status columns already exist")
+            print("[DB] Online status columns already exist")
     except Exception as e:
         print(f"[DB] Migration error: {e}")
 
@@ -1386,9 +1386,9 @@ def migrate_add_report_evidence():
             print("[DB] Adding evidence_file column to reports table...")
             cursor.execute('ALTER TABLE reports ADD COLUMN evidence_file TEXT')
             conn.commit()
-            print("[DB] ✅ Evidence column added successfully")
+            print("[DB] Evidence column added successfully")
         else:
-            print("[DB] ✅ Evidence column already exists")
+            print("[DB] Evidence column already exists")
     except Exception as e:
         print(f"[DB] Migration error: {e}")
 
@@ -1566,9 +1566,9 @@ def delete_user_data_gdpr(username: str) -> dict:
                         try:
                             Path(file_path).unlink()
                             stats['files_deleted'] += 1
-                            print(f"[GDPR] ✓ Deleted: {file_path}")
+                            print(f"[GDPR] Deleted: {file_path}")
                         except Exception as e:
-                            print(f"[GDPR] ✗ Failed to delete {file_path}: {e}")
+                            print(f"[GDPR] Failed to delete {file_path}: {e}")
                 
             except json.JSONDecodeError as e:
                 print(f"[GDPR] JSON decode error for message {row['id']}: {e}")
@@ -1630,7 +1630,7 @@ def delete_user_data_gdpr(username: str) -> dict:
                 # Track deleted room for broadcast
                 stats['deleted_rooms'].append(room_id)
                 
-                print(f"[GDPR] ✓ Deleted empty room: {room_id}")
+                print(f"[GDPR] Deleted empty room: {room_id}")
         
         # STEP 4: DELETE MESSAGES (not already deleted by room cascade)
         cursor.execute('DELETE FROM messages WHERE sender = ?', (username,))
@@ -1677,12 +1677,12 @@ def delete_user_data_gdpr(username: str) -> dict:
                     if full_path.exists():
                         full_path.unlink()
                         evidence_deleted += 1
-                        print(f"[GDPR] ✓ Deleted evidence: {filename}")
+                        print(f"[GDPR] Deleted evidence: {filename}")
                     else:
-                        print(f"[GDPR] ⚠ Evidence not found: {filename}")
+                        print(f"[GDPR] Evidence not found: {filename}")
                         
             except Exception as e:
-                print(f"[GDPR] ✗ Error deleting evidence: {e}")
+                print(f"[GDPR] Error deleting evidence: {e}")
 
         stats['evidence_deleted'] = evidence_deleted
         print(f"[GDPR] Deleted {evidence_deleted} evidence images")
@@ -1692,7 +1692,7 @@ def delete_user_data_gdpr(username: str) -> dict:
         print(f"[GDPR] Deleted {stats['reports_deleted']} reports")
         
         conn.commit()
-        print(f"[GDPR] ✓ All data deleted for {username}")
+        print(f"[GDPR] All data deleted for {username}")
         return stats
         
     except Exception as e:

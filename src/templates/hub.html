@@ -11,7 +11,7 @@
   <div class="container">
     <div class="header">
       <div>
-        <h1>🏠 Chat Hub</h1>
+        <h1>Chat Hub</h1>
         <div class="user-info">
           Welcome, <strong>{{ username }}</strong>
           {% if is_global_admin %}
@@ -21,9 +21,9 @@
       </div>
       <div class="actions">
         <button class="btn btn-primary" onclick="showCreateModal()">+ Create Room</button>
-        <button class="btn btn-secondary" onclick="showSearchModal()">🔍 Search</button>
-        <button class="btn btn-secondary" onclick="exportAccountData()">📥 Export Data</button>
-        <button class="btn btn-danger" onclick="showDeleteAccountModal()">🗑️ Delete Account</button>
+        <button class="btn btn-secondary" onclick="showSearchModal()">Search</button>
+        <button class="btn btn-secondary" onclick="exportAccountData()">Export Data</button>
+        <button class="btn btn-danger" onclick="showDeleteAccountModal()">Delete Account</button>
         <a href="/logout" class="btn btn-secondary">Logout</a>
       </div>
     </div>
@@ -39,7 +39,7 @@
 
     <div id="roomsTab" class="tab-content active">
       <div class="section">
-        <h2>💬 Your Rooms (<span id="yourRoomsCount">{{ user_rooms|length }}</span>)</h2>
+        <h2>Your Rooms (<span id="yourRoomsCount">{{ user_rooms|length }}</span>)</h2>
         <div class="room-grid" id="userRoomsList">
           {% if user_rooms %}
             {% for room in user_rooms %}
@@ -53,7 +53,7 @@
                   <span class="room-badge badge-admin">Admin</span>
                   {% endif %}
                 </div>
-                <div>👥 {{ room.member_count }} members</div>
+                <div>{{ room.member_count }} members</div>
               </div>
             </div>
             {% endfor %}
@@ -69,7 +69,7 @@
       </div>
 
       <div class="section">
-        <h2>🌐 Public Rooms</h2>
+        <h2>Public Rooms</h2>
         <div class="room-grid" id="publicRoomsList">
           {% if public_rooms %}
             {% for room in public_rooms %}
@@ -81,7 +81,7 @@
                   <span class="room-badge badge-public">Public</span>
                   <span style="font-size: 11px; color: #999;">by {{ room.creator }}</span>
                 </div>
-                <div>👥 {{ room.member_count }}/{{ room.max_members }}</div>
+                <div>{{ room.member_count }}/{{ room.max_members }}</div>
               </div>
             </div>
             {% endfor %}
@@ -97,7 +97,7 @@
     {% if is_global_admin %}
     <div id="reportsTabContent" class="tab-content">
       <div class="section">
-        <h2>⚠️ Pending Reports</h2>
+        <h2>Pending Reports</h2>
         <div id="reportsList">
           {% if pending_reports %}
             {% for report in pending_reports %}
@@ -122,7 +122,7 @@
                 {% endif %}
               </div>
               <div class="report-actions">
-                <button class="btn btn-primary" onclick="viewRoomDetails('{{ report.room_id }}', {{ report.id }})">🔍 View Details</button>
+                <button class="btn btn-primary" onclick="viewRoomDetails('{{ report.room_id }}', {{ report.id }})">View Details</button>
                 <button class="btn btn-secondary" onclick="resolveReport({{ report.id }})">Resolve</button>
                 <button class="btn btn-danger" onclick="deleteReportedRoom('{{ report.room_id }}', {{ report.id }})">Delete Room</button>
               </div>
@@ -130,7 +130,7 @@
             {% endfor %}
           {% else %}
           <div class="empty-state">
-            <p>✅ No pending reports. All good!</p>
+            <p>No pending reports. All good!</p>
           </div>
           {% endif %}
         </div>
@@ -161,7 +161,7 @@
         </div>
         <div class="form-group" id="privateOptionsGroup" style="display: none;">
           <div class="info-box">
-            💡 Private rooms ALWAYS get an invite link. You can also add a password for extra security.
+            Private rooms ALWAYS get an invite link. You can also add a password for extra security.
           </div>
           <div class="checkbox-group">
             <input type="checkbox" id="usePassword" name="use_password">
@@ -233,7 +233,7 @@
   <!-- Room Snapshot Modal -->
   <div id="snapshotModal" class="modal">
     <div class="modal-content" style="max-width: 800px;">
-      <h3>🔍 Room Details & History</h3>
+      <h3>Room Details & History</h3>
       <div id="snapshotContent" style="max-height: 70vh; overflow-y: auto;">
         <p style="text-align: center; color: #999;">Loading snapshot...</p>
       </div>
@@ -246,7 +246,7 @@
   <!-- Delete Account Modal (GDPR) -->
   <div id="deleteAccountModal" class="modal">
     <div class="modal-content">
-      <h3>⚠️ Permanently Delete Account</h3>
+      <h3>Permanently Delete Account</h3>
       <p style="color: #dc2626; font-weight: 600; margin-bottom: 16px;">
         WARNING: This action CANNOT be undone!
       </p>
@@ -342,7 +342,7 @@
               <span class="room-badge badge-${room.type}">${room.type.toUpperCase()}</span>
               ${room.role === 'admin' ? '<span class="room-badge badge-admin">Admin</span>' : ''}
             </div>
-            <div>👥 ${room.member_count} members</div>
+            <div>${room.member_count} members</div>
           </div>
         `;
         container.appendChild(card);
@@ -372,7 +372,7 @@
               <span class="room-badge badge-public">Public</span>
               <span style="font-size: 11px; color: #999;">by ${escapeHtml(room.creator)}</span>
             </div>
-            <div>👥 ${room.member_count}/${room.max_members}</div>
+            <div>${room.member_count}/${room.max_members}</div>
           </div>
         `;
         container.appendChild(card);
@@ -393,7 +393,7 @@
       container.innerHTML = '';
       
       if (!reports || reports.length === 0) {
-        container.innerHTML = '<div class="empty-state"><p>✅ No pending reports. All good!</p></div>';
+        container.innerHTML = '<div class="empty-state"><p>No pending reports. All good!</p></div>';
         return;
       }
       
@@ -430,7 +430,7 @@
             })() : ''}
           </div>
           <div class="report-actions">
-            <button class="btn btn-primary" onclick="viewRoomDetails('${report.room_id}', ${report.id})">🔍 View Details</button>
+            <button class="btn btn-primary" onclick="viewRoomDetails('${report.room_id}', ${report.id})">View Details</button>
             <button class="btn btn-secondary" onclick="resolveReport(${report.id})">Resolve</button>
             <button class="btn btn-danger" onclick="deleteReportedRoom('${report.room_id}', ${report.id})">Delete Room</button>
           </div>
@@ -659,7 +659,7 @@
             <div>
               <span class="room-badge badge-${room.type}">${room.type}</span>
             </div>
-            <div>👥 ${room.member_count || 0}/${room.max_members || 50}</div>
+            <div>${room.member_count || 0}/${room.max_members || 50}</div>
           </div>
         `;
         container.appendChild(card);
@@ -685,7 +685,7 @@
       
       let html = `
         <div class="snapshot-section">
-          <h4 class="snapshot-title">📊 Room Information</h4>
+          <h4 class="snapshot-title">Room Information</h4>
           <p><strong>Name:</strong> ${escapeHtml(room.name)}</p>
           <p><strong>Type:</strong> <span class="room-badge badge-${room.type}">${room.type.toUpperCase()}</span></p>
           <p><strong>Creator:</strong> ${escapeHtml(room.creator)}</p>
@@ -695,7 +695,7 @@
         </div>
         
         <div class="snapshot-section">
-          <h4 class="snapshot-title">👥 Members (${members.length})</h4>
+          <h4 class="snapshot-title">Members (${members.length})</h4>
           <div class="members-grid">
       `;
       
@@ -723,7 +723,7 @@
         
         html += `
           <div class="snapshot-section report-section ${riskClass}">
-            <h4 class="snapshot-title">⚠️ Report History 
+            <h4 class="snapshot-title">Report History 
               <span class="risk-badge ${riskClass}">
                 ${reportHistory.risk_level} RISK
               </span>
@@ -745,7 +745,7 @@
             </div>
             
             <p class="recent-count">
-              📊 <strong>${reportHistory.recent_reports_7d}</strong> reports in the last 7 days
+              <strong>${reportHistory.recent_reports_7d}</strong> reports in the last 7 days
             </p>
         `;
         
@@ -776,7 +776,7 @@
             html += `<p class="more-reports">+ ${reportHistory.reports.length - 5} more reports</p>`;
           }
         } else {
-          html += '<p class="no-reports">✅ No reports filed for this room</p>';
+          html += '<p class="no-reports">No reports filed for this room</p>';
         }
         
         html += '</div>';
@@ -845,7 +845,7 @@
           
           const reportsList = document.getElementById('reportsList');
           if (reportsList && reportsList.querySelectorAll('.report-item').length === 0) {
-            reportsList.innerHTML = '<div class="empty-state"><p>✅ No pending reports. All good!</p></div>';
+            reportsList.innerHTML = '<div class="empty-state"><p>No pending reports. All good!</p></div>';
           }
           
           const count = document.getElementById('reportCount');
@@ -935,7 +935,7 @@
       
       // Final confirmation
       const confirmed = confirm(
-        '⚠️ FINAL WARNING ⚠️\n\n' +
+        'FINAL WARNING\n\n' +
         'This will PERMANENTLY delete your account and ALL your data.\n\n' +
         'This action CANNOT be undone.\n\n' +
         'Are you absolutely sure?'
@@ -954,7 +954,7 @@
         
         if (result.success) {
           alert(
-            '✅ Account Deleted Successfully\n\n' +
+            'Account Deleted Successfully\n\n' +
             'Deleted:\n' +
             `• ${result.stats.messages_deleted} messages\n` +
             `• ${result.stats.reactions_deleted} reactions\n` +
@@ -1077,7 +1077,7 @@
           document.body.removeChild(link);
           
           alert(
-            '✅ Data Exported Successfully\n\n' +
+            'Data Exported Successfully\n\n' +
             `Total messages: ${exportData.messages.length}\n` +
             `Decrypted: ${decryptedCount}\n` +
             `Failed: ${failedCount}\n` +

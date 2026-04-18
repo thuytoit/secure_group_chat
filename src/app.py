@@ -1593,7 +1593,7 @@ def handle_message(data):
             # This broadcasts to ALL clients in the Socket.IO room
             emit('encrypted_msg', msg_payload, to=room_id, include_self=True, broadcast=True)
             
-            logger.info(f"[MSG] ✓ Broadcasted message {msg_id} to all members in room {room_id}")
+            logger.info(f"[MSG] Broadcasted message {msg_id} to all members in room {room_id}")
             
     except Exception as e:
         logger.error(f"[MSG] Error: {e}")
@@ -1697,6 +1697,40 @@ def handle_file_upload(data):
     except Exception as e:
         logger.error(f"[FILE] Upload error: {e}")
         emit('upload_error', {'msg': f'File upload failed: {str(e)}'})
+
+@socketio.on('delete_uploaded_file')
+def handle_delete_uploaded_file(data):
+    """
+    Delete an uploaded file that was never sent (user removed it from preview).
+    
+    Called when user clicks the remove button on a pending file attachment
+    before sending the message. Cleans up the server-side orphaned file.
+    
+    Socket Event Data:
+        file_id (str): ID of the file to delete (format: file_<hex>)
+    
+    Emits:
+        'file_delete_error': If file_id is invalid or file not found
+    """
+    sid = request.sid
+    if sid not in connections:
+        return
+    
+    file_id = data.get('file_id', '')
+    
+    # Validate format to prevent path traversal
+    if not file_id or not file_id.startswith('file_'):
+        return
+    
+    import glob
+    matching_files = glob.glob(str(UPLOAD_FOLDER / f"{file_id}_*"))
+    
+    for file_path in matching_files:
+        try:
+            Path(file_path).unlink()
+            logger.info(f"[FILE] Deleted orphaned file on user cancel: {file_path}")
+        except Exception as e:
+            logger.error(f"[FILE] Failed to delete orphaned file {file_path}: {e}")
         
 @socketio.on('delete_message')
 def handle_delete_message(data):
@@ -2083,15 +2117,15 @@ try:
         }
         logger.info(f"[STARTUP] Loaded room {room_id}: key v{key_version}, generator={generator}")
     
-    logger.info(f"[STARTUP] ✅ Loaded {len(room_keys)} room key versions from database")
+    logger.info(f"[STARTUP] Loaded {len(room_keys)} room key versions from database")
 except Exception as e:
-    logger.error(f"[STARTUP] ❌ Failed to load room keys: {e}")
+    logger.error(f"[STARTUP] Failed to load room keys: {e}")
 # ===== END ROOM_KEYS POPULATION =====
 
 logger.info("="*60)
-logger.info("🚀 STARTING SERVER - Fresh Instance")
-logger.info(f"📊 Database: {db.DB_PATH}")
-logger.info(f"🔑 Room keys in memory: {len(room_manager.room_keys) if hasattr(room_manager, 'room_keys') else 0}")
+logger.info("STARTING SERVER - Fresh Instance")
+logger.info(f"Database: {db.DB_PATH}")
+logger.info(f"Room keys in memory: {len(room_manager.room_keys) if hasattr(room_manager, 'room_keys') else 0}")
 logger.info("="*60)
 
 if __name__ == '__main__':

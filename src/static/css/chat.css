@@ -202,8 +202,8 @@ body {
     flex: 1; 
     font-size: 14px; 
     color: #333;
-    display: flex;  /* ✅ MAKE IT FLEX */
-    align-items: center;  /* ✅ CENTER VERTICALLY */
+    display: flex;
+    align-items: center;
 }
 
 .member-item .badge {
@@ -220,6 +220,7 @@ body {
     display: flex;
     flex-direction: column;
     background: white;
+    min-width: 0;
 }
 
 #messages {
@@ -229,6 +230,7 @@ body {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    min-width: 0;
 }
 
 .load-more {
@@ -247,6 +249,7 @@ body {
 /* ===== MESSAGES ===== */
 .msg {
     max-width: 70%;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     margin-bottom: 4px;
@@ -275,9 +278,14 @@ body {
     background: #f3f4f6;
     padding: 12px 16px;
     border-radius: 12px;
+    /* FIX: long message word wrap */
     word-wrap: break-word;
-    position: relative;
+    overflow-wrap: anywhere;
+    word-break: break-word;
     white-space: pre-wrap;
+    position: relative;
+    max-width: 100%;
+    min-width: 0;
 }
 
 .msg.own .msg-body {
@@ -310,6 +318,7 @@ body {
     gap: 8px;
     margin-top: 4px;
     font-size: 11px;
+    position: relative;
 }
 
 .msg-action {
@@ -403,6 +412,12 @@ body {
     cursor: pointer;
     font-size: 16px;
     padding: 4px;
+    color: #666;
+    line-height: 1;
+}
+
+.file-preview button:hover {
+    color: #ef4444;
 }
 
 .upload-progress {
@@ -436,6 +451,7 @@ body {
     resize: none;
     max-height: 120px;
     font-family: inherit;
+    min-width: 0;
 }
 
 #msg-input:focus {
@@ -631,7 +647,7 @@ body {
     color: #374151;
 }
 
-/* ===== PASSWORD TOGGLE ===== */
+/* ===== PASSWORD TOGGLE — text "Show/Hide" style ===== */
 .password-toggle {
     position: absolute;
     right: 10px;
@@ -640,13 +656,28 @@ body {
     border: none;
     background: none;
     cursor: pointer;
-    font-size: 18px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #667eea;
+    padding: 3px 6px;
+    border-radius: 4px;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.password-toggle:hover {
+    background: #f0f4ff;
+    color: #5568d3;
 }
 
 .input-with-toggle {
     position: relative;
     display: flex;
     align-items: center;
+}
+
+.input-with-toggle input {
+    padding-right: 52px !important;
 }
 
 /* ===== KEY STATUS ===== */
@@ -670,7 +701,7 @@ body {
     background: #ef4444; 
 }
 
-/* ===== EMOJI PICKER ===== */
+/* ===== EMOJI PICKER — FIX: horizontal row ===== */
 .emoji-picker {
     position: absolute;
     bottom: 100%;
@@ -678,26 +709,44 @@ body {
     background: white;
     border: 1px solid #e5e7eb;
     border-radius: 8px;
-    padding: 12px;
+    padding: 8px 10px;
+    /* FIX: hide by default with display:none */
     display: none;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    z-index: 100;
-    margin-bottom: 8px;
+    /* FIX: force single horizontal row */
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 2px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+    z-index: 9999;
+    margin-bottom: 6px;
+    /* FIX: don't let container constrain width */
+    width: max-content;
+    max-width: none;
 }
 
 .emoji-picker.active { 
-    display: block; 
+    display: flex;
+}
+
+/* FIX: own messages open picker to the right side */
+.msg.own .emoji-picker {
+    left: auto;
+    right: 0;
 }
 
 .emoji-picker .emoji {
-    font-size: 24px;
+    font-size: 22px;
     cursor: pointer;
-    padding: 4px;
+    padding: 4px 5px;
     display: inline-block;
     user-select: none;
+    border-radius: 4px;
+    transition: background 0.15s, transform 0.15s;
+    line-height: 1;
 }
 
 .emoji-picker .emoji:hover { 
+    background: #f3f4f6;
     transform: scale(1.2); 
 }
 
@@ -730,7 +779,7 @@ body {
     display: inline-block;
     vertical-align: middle;
     position: relative;
-    top: -1px;  /* Perfect vertical alignment */
+    top: -1px;
 }
 
 .status-dot.online {
