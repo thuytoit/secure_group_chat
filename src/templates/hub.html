@@ -171,7 +171,7 @@
             <div class="input-with-toggle">
               <input type="password" id="createRoomPassword" name="password" placeholder="Enter password" style="padding-right: 40px;">
               <button type="button" class="password-toggle" onclick="togglePasswordVisibility('createRoomPassword', this)">
-                👁️
+                Show
               </button>
             </div>
           </div>
@@ -212,14 +212,14 @@
   <!-- Password Prompt Modal -->
   <div id="passwordPromptModal" class="modal">
     <div class="modal-content">
-      <h3>🔒 Password Required</h3>
+      <h3>Password Required</h3>
       <p style="margin-bottom: 16px; color: #666;">This room is password-protected. Enter the password to join.</p>
       <div class="form-group">
         <label>Password</label>
         <div class="input-with-toggle">
           <input type="password" id="passwordPromptInput" placeholder="Enter room password" style="padding-right: 40px;">
           <button type="button" class="password-toggle" onclick="togglePasswordVisibility('passwordPromptInput', this)">
-            👁️
+            Show
           </button>
         </div>
       </div>
@@ -269,7 +269,7 @@
         <div class="input-with-toggle">
           <input type="password" id="deleteAccountPassword" placeholder="Your password" style="padding-right: 40px;">
           <button type="button" class="password-toggle" onclick="togglePasswordVisibility('deleteAccountPassword', this)">
-            👁️
+            Show
           </button>
         </div>
       </div>
@@ -486,10 +486,10 @@
       const input = document.getElementById(inputId);
       if (input.type === 'password') {
         input.type = 'text';
-        button.textContent = '🙈';
+        button.textContent = 'Hide';
       } else {
         input.type = 'password';
-        button.textContent = '👁️';
+        button.textContent = 'Show';
       }
     }
 

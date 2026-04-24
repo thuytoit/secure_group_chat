@@ -352,3 +352,51 @@ body.dark-mode .more-reports {
     transform: scale(1.1);
     box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
 }
+
+/* ===== MODAL LABELS (bare labels in chat modals) ===== */
+body.dark-mode .modal-content label {
+    color: #e0e0e0;
+}
+
+/* ===== SWITCH TYPE SELECT (ID override needed) ===== */
+body.dark-mode #switchTypeSelect {
+    background: #3d3d3d;
+    border-color: #4d4d4d;
+    color: #e0e0e0;
+}
+
+body.dark-mode #switchTypeSelect:focus {
+    border-color: #667eea;
+    background: #454545;
+}
+
+/* ===== SWITCH PASSWORD INPUT ===== */
+body.dark-mode #switchPasswordInput input {
+    background: #3d3d3d;
+    border-color: #4d4d4d;
+    color: #e0e0e0;
+}
+
+body.dark-mode #switchPasswordInput input:focus {
+    border-color: #667eea;
+    background: #454545;
+}
+
+/* ===== KICK USERNAME INPUT (bare input in modal) ===== */
+body.dark-mode #kickUsername,
+body.dark-mode #reportReason,
+body.dark-mode #reportDetails {
+    background: #3d3d3d;
+    border-color: #4d4d4d;
+    color: #e0e0e0;
+}
+
+/* ===== EDIT MODAL BARE INPUTS ===== */
+body.dark-mode #editRoomName,
+body.dark-mode #editDescription,
+body.dark-mode #editMaxMembers,
+body.dark-mode #editPassword {
+    background: #3d3d3d;
+    border-color: #4d4d4d;
+    color: #e0e0e0;
+}
