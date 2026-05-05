@@ -325,32 +325,14 @@
     }
 
     function deriveP2PKey(dhSharedSecret) {
-      // Convert BigInt shared secret to 32-byte hex string
-      let sharedHex = dhSharedSecret.toString(16);
-      if (sharedHex.length % 2 !== 0) {
-        sharedHex = '0' + sharedHex;
-      }
-      
-      const sharedBytes = [];
-      for (let i = 0; i < sharedHex.length; i += 2) {
-        sharedBytes.push(parseInt(sharedHex.substring(i, i + 2), 16));
-      }
-      
-      const shared32 = new Uint8Array(32);
-      for (let i = 0; i < Math.min(sharedBytes.length, 32); i++) {
-        shared32[i] = sharedBytes[i];
-      }
-      
-      const shared32Hex = Array.from(shared32)
-        .map(b => b.toString(16).padStart(2, '0'))
-        .join('');
-      
-      // Derive P2P encryption key with PBKDF2
-      return CryptoJS.PBKDF2(
-        CryptoJS.enc.Hex.parse(shared32Hex),
-        CryptoJS.enc.Utf8.parse(SALT),
-        { keySize: 8, iterations: ITERATIONS, hasher: CryptoJS.algo.SHA256 }
-      );
+        let sharedHex = dhSharedSecret.toString(16);
+        if (sharedHex.length % 2 !== 0) sharedHex = '0' + sharedHex;
+        const shared32Hex = sharedHex.slice(0, 64).padEnd(64, '0');
+        return CryptoJS.PBKDF2(
+            CryptoJS.enc.Hex.parse(shared32Hex),
+            CryptoJS.enc.Utf8.parse(SALT),
+            { keySize: 8, iterations: ITERATIONS, hasher: CryptoJS.algo.SHA256 }
+        );
     }
 
     function updateStatus(msg, isReady = false, isError = false) {
