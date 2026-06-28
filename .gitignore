@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+src/chat.db
+users.json
+src/uploads/*
+!src/uploads/.gitkeep
+.env
+.DS_Store
