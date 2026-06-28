@@ -8,8 +8,9 @@ Built as a Bachelor's thesis project at International University — Vietnam Nat
 
 ## Demo
 
-- [Main Features Demo](https://youtu.be/XzBxMwm1Nhg?si=yGm-R0IO9qP6YXbv)
-- [Additional Features Demo](https://youtu.be/DzQl8hLjbBY?si=nqyDo8OK02-x11o8)
+[![Main Features Demo](https://img.youtube.com/vi/XzBxMwm1Nhg/hqdefault.jpg)](https://youtu.be/XzBxMwm1Nhg?si=yGm-R0IO9qP6YXbv)
+
+[![Additional Features Demo](https://img.youtube.com/vi/DzQl8hLjbBY/hqdefault.jpg)](https://youtu.be/DzQl8hLjbBY?si=nqyDo8OK02-x11o8)
 
 ---
 
