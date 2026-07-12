@@ -3,8 +3,11 @@ __pycache__/
 *.pyc
 *.pyo
 src/chat.db
+src/config.json
 users.json
 src/uploads/*
+!src/uploads/evidence/
+!src/uploads/evidence/.gitkeep
 !src/uploads/.gitkeep
 .env
 .DS_Store

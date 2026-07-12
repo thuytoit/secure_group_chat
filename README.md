@@ -8,7 +8,11 @@ Built as a Bachelor's thesis project at International University — Vietnam Nat
 
 ## Demo
 
+**Main Features Demo**
+
 [![Main Features Demo](https://img.youtube.com/vi/XzBxMwm1Nhg/hqdefault.jpg)](https://youtu.be/XzBxMwm1Nhg?si=yGm-R0IO9qP6YXbv)
+
+**Additional Features Demo**
 
 [![Additional Features Demo](https://img.youtube.com/vi/DzQl8hLjbBY/hqdefault.jpg)](https://youtu.be/DzQl8hLjbBY?si=nqyDo8OK02-x11o8)
 
@@ -103,6 +107,8 @@ python app.py
 Default admin account: `admin` / `adminpass`
 
 The database (`src/chat.db`), user accounts file (`users.json`), and uploads folder are created automatically on first run. No manual setup required.
+
+Copy src/config.example.json and rename it to src/config.json; then edit src/config.json to set secret_key to a long random secret and salt to a unique string.
 
 ---
 
